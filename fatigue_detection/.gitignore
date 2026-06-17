@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project data (screenshots are personal, CSVs are calibration outputs)
+data/screenshots/
+data/calibration/
+
+# Model file (downloaded separately, not in repo)
+# Uncomment if model is too large:
+# models/face_landmarker.task
+
+# Jupyter
+.ipynb_checkpoints/
