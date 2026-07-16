@@ -15,33 +15,41 @@ from camera import Camera
 from detector import FaceMeshDetector
 from features import (
     calculate_ear, calculate_mar,
+    calculate_head_pose, draw_head_axes,
     LEFT_EYE_INDICES, RIGHT_EYE_INDICES,
-    EARSmoother, MARSmoother,
+    EARSmoother, MARSmoother, HeadPoseSmoother, PERCLOSCounter,
 )
 from config import (
     EAR_THRESHOLD, EAR_CONSECUTIVE_FRAMES,
     MAR_THRESHOLD, MAR_YAWN_DURATION_SEC, MAR_YAWN_GRACE_SEC,
-    SHOW_FACE_MESH,
-    SHOW_EYE_POINTS, SHOW_MOUTH_POINTS,
+    PITCH_DOWN_THRESHOLD, HEAD_DOWN_DURATION_SEC, YAW_DEVIATION_THRESHOLD,
+    PITCH_OFFSET,
+    SHOW_FACE_MESH, SHOW_EYE_POINTS, SHOW_MOUTH_POINTS, SHOW_HEAD_POSE_AXIS,
+    PERCLOS_WINDOW_SEC, PERCLOS_THRESHOLD,
 )
 
 
 def main():
     # ── 初始化 ──────────────────────────────
-    print("📷 打开摄像头...")
+    print("打开摄像头...")
     cam = Camera()
     if not cam.open():
-        print("❌ 无法打开摄像头！")
+        print("[ERROR] 无法打开摄像头！")
         return
     print(f"   分辨率: {cam.resolution[0]}x{cam.resolution[1]}")
 
-    print("🧠 加载 MediaPipe Face Mesh...")
+    print("[LOAD] 加载 MediaPipe Face Mesh...")
     detector = FaceMeshDetector()
     print("   就绪！\n")
 
     # 平滑器
     ear_smoother = EARSmoother(window_size=5)
     mar_smoother = MARSmoother(window_size=5)
+    head_pose_smoother = HeadPoseSmoother(window_size=5)
+    perclos_counter = PERCLOSCounter(
+    window_sec=PERCLOS_WINDOW_SEC,
+    ear_threshold=EAR_THRESHOLD,
+    fps=30,)
 
     # 哈欠计时器
     yawn_start_time = None       # 开始张嘴的时间戳
@@ -71,6 +79,7 @@ def main():
         # ── 特征提取 ──────────────────────────
         ear_left = ear_right = ear_avg = 0.0
         mar_val = 0.0
+        pitch = yaw = roll = 0.0
         face_found = detector.has_face(results)
         landmarks = []
 
@@ -82,6 +91,8 @@ def main():
                 ear_left = calculate_ear(landmarks, LEFT_EYE_INDICES)
                 ear_right = calculate_ear(landmarks, RIGHT_EYE_INDICES)
                 ear_left, ear_right, ear_avg = ear_smoother.update(ear_left, ear_right)
+                perclos_counter.update(ear_avg if face_found else None)
+                perclos_value = perclos_counter.get_perclos()
 
                 # --- 持续闭眼计数 ---
                 if ear_avg < EAR_THRESHOLD:
@@ -92,6 +103,10 @@ def main():
                 # --- MAR ---
                 mar_val = calculate_mar(landmarks)
                 mar_val = mar_smoother.update(mar_val)
+
+                # --- HeadPose ---
+                pitch, yaw, roll = calculate_head_pose(landmarks, w, h)
+                pitch, yaw, roll = head_pose_smoother.update(pitch, yaw, roll)
 
         # ── 哈欠检测状态机 ────────────────────
         fps = cam.fps if cam.fps > 0 else 30
@@ -110,7 +125,7 @@ def main():
             if yawn_elapsed >= MAR_YAWN_DURATION_SEC and not yawn_in_progress:
                 yawn_count += 1
                 yawn_in_progress = True
-                print(f"🥱 检测到哈欠 #{yawn_count}！（MAR={mar_val:.3f}, 持续{yawn_elapsed:.1f}s）")
+                print(f"[YAWN] 检测到哈欠 #{yawn_count}！（MAR={mar_val:.3f}, 持续{yawn_elapsed:.1f}s）")
         else:
             # MAR 低于阈值 → 启动宽容缓冲，不立刻重置
             if yawn_start_time is not None:
@@ -192,7 +207,31 @@ def main():
                 cv2.putText(frame, f"Yawns: {yawn_count}", (10, y_offset),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
 
-            # 嘴部标记点（3组上下唇，6个点）
+        # ── HeadPose 显示 ──────────────────────
+        if face_found and len(landmarks) >= 478:
+            y_offset += 6
+
+            # 基线校准：实际低头角 = pitch - 正常坐姿基线
+            effective_pitch = pitch - PITCH_OFFSET
+
+            # 角度数值
+            pitch_color = (0, 0, 255) if effective_pitch > PITCH_DOWN_THRESHOLD else (0, 255, 255) if abs(effective_pitch) < 10 else (0, 165, 255)
+            yaw_color   = (0, 0, 255) if abs(yaw) > YAW_DEVIATION_THRESHOLD else (0, 255, 255)
+            cv2.putText(frame, f"Pitch: {pitch:.1f} ({effective_pitch:+.1f})  Yaw: {yaw:.1f}  Roll: {roll:.1f}",
+                        (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, pitch_color, 2)
+            y_offset += 22
+
+            # 低头警告（只限 effective_pitch 正值过大，仰头不警告）
+            if effective_pitch > PITCH_DOWN_THRESHOLD:
+                cv2.putText(frame, "HEAD DOWN!", (10, y_offset),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                y_offset += 22
+
+            # 3D 坐标轴（画在鼻尖位置）
+            if SHOW_HEAD_POSE_AXIS:
+                draw_head_axes(frame, landmarks, w, h)
+
+        # 嘴部标记点（3组上下唇，6个点）
             if SHOW_MOUTH_POINTS and len(landmarks) >= 478:
                 from features import MOUTH_VERTICAL_PAIRS, MOUTH_CORNER_LEFT, MOUTH_CORNER_RIGHT
                 for up, lo in MOUTH_VERTICAL_PAIRS:
@@ -218,20 +257,20 @@ def main():
         # ── 按键 ──────────────────────────────
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
-            print("👋 退出")
+            print("[EXIT] 退出")
             break
         elif key == ord('s'):
             os.makedirs("data/screenshots", exist_ok=True)
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             filename = f"data/screenshots/MAR_{timestamp}.png"
             cv2.imwrite(filename, frame)
-            print(f"📸 截图: {filename}")
+            print(f"[SHOT] 截图: {filename}")
 
     # ── 清理 ────────────────────────────────
     cam.release()
     detector.close()
     cv2.destroyAllWindows()
-    print("✅ 已释放所有资源")
+    print("[OK] 已释放所有资源")
 
 
 if __name__ == "__main__":

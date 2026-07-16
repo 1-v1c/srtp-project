@@ -15,10 +15,10 @@ from PIL import Image, ImageDraw, ImageFont
 from camera import Camera
 from detector import FaceMeshDetector
 from features import (
-    calculate_ear, calculate_mar,
+    calculate_ear, calculate_mar, calculate_head_pose,
     LEFT_EYE_INDICES, RIGHT_EYE_INDICES,
     MOUTH_VERTICAL_PAIRS, MOUTH_CORNER_LEFT, MOUTH_CORNER_RIGHT,
-    EARSmoother, MARSmoother,
+    EARSmoother, MARSmoother, HeadPoseSmoother,
 )
 from logger import CalibLogger
 from config import (
@@ -160,8 +160,18 @@ def _draw_text(img, text, x, y, scale=SCALE_BODY, color=CLR_TEXT, thickness=2,
 # ── 圆角矩形 ──────────────────────────────────────────────
 
 def _rounded_rect(img, x, y, w, h, r, color, alpha=1.0):
-    """绘制填充圆角矩形（支持半透明）"""
+    """绘制填充圆角矩形（支持半透明），自动裁剪到画面边界"""
     x, y, w, h, r = int(x), int(y), int(w), int(h), int(r)
+    if w <= 0 or h <= 0:
+        return
+    # 裁剪到图像边界
+    H_img, W_img = img.shape[:2]
+    if x >= W_img or y >= H_img:
+        return
+    if x + w > W_img:
+        w = W_img - x
+    if y + h > H_img:
+        h = H_img - y
     if w <= 0 or h <= 0:
         return
     r = min(r, w // 2, h // 2)
@@ -184,8 +194,18 @@ def _rounded_rect(img, x, y, w, h, r, color, alpha=1.0):
         cv2.addWeighted(blended, alpha, roi, 1 - alpha, 0, roi)
 
 def _rounded_outline(img, x, y, w, h, r, color, thickness=1):
-    """绘制圆角边框"""
+    """绘制圆角边框，自动裁剪到画面边界"""
     x, y, w, h, r = int(x), int(y), int(w), int(h), int(r)
+    if w <= 0 or h <= 0:
+        return
+    # 裁剪到图像边界
+    H_img, W_img = img.shape[:2]
+    if x >= W_img or y >= H_img:
+        return
+    if x + w > W_img:
+        w = W_img - x
+    if y + h > H_img:
+        h = H_img - y
     if w <= 0 or h <= 0:
         return
     r = min(r, w // 2, h // 2)
@@ -226,10 +246,10 @@ def _draw_btn(img, x, y, w, h, text, selected=False, accent=CLR_PRIMARY):
         _draw_text(img, text, x + w // 2, y + h // 2 + 5,
                    SCALE_BODY, (255, 255, 255), 1, align="center")
     else:
-        _rounded_rect(img, x, y, w, h, r, CLR_SURFACE, alpha=0.75)
-        _rounded_outline(img, x, y, w, h, r, CLR_BORDER)
+        _rounded_rect(img, x, y, w, h, r, CLR_SURFACE, alpha=0.92)
+        _rounded_outline(img, x, y, w, h, r, (100, 98, 98), thickness=1)
         _draw_text(img, text, x + w // 2, y + h // 2 + 5,
-                   SCALE_BODY, CLR_TEXT, 1, align="center")
+                   SCALE_BODY, CLR_TEXT_DIM, 1, align="center")
 
 # ── 记录卡片 ──────────────────────────────────────────────
 
@@ -279,6 +299,7 @@ class CalibTool:
         self.detector = FaceMeshDetector()
         self.ear_smoother = EARSmoother(5)
         self.mar_smoother = MARSmoother(5)
+        self.head_pose_smoother = HeadPoseSmoother(5)
 
         # ── UI 状态 ──
         self.phase = "EAR"
@@ -291,9 +312,14 @@ class CalibTool:
         self.records: list[dict] = []
         self.selected_record_idx = -1
         self._card_rects: list[tuple] = []
+        self._pending_delete = False  # Backspace 首次按提示，再按才删
+        self._pending_quit = False    # Q 首次按提示，再按才退出
+        self._scroll_offset = 0       # 记录列表滚动位置
+        self._max_side_cards = 5      # 侧面板最大可见卡片（_draw_side_panel 中更新）
 
         # ── 日志 ──
-        self.logger = CalibLogger()
+        _proj_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.logger = CalibLogger(log_dir=os.path.join(_proj_dir, "data", "calibration"))
         self.logger.open_session()
 
         # ── 尺寸 ──
@@ -310,6 +336,7 @@ class CalibTool:
         # ── 当前帧数据 ──
         self.ear_left = self.ear_right = self.ear_avg = 0.0
         self.mar_val = 0.0
+        self.pitch = self.yaw = self.roll = 0.0
         self.face_found = False
         self.fps_val = 0.0
 
@@ -319,9 +346,9 @@ class CalibTool:
 
     def run(self):
         if not self.cam.open():
-            print("❌ 无法打开摄像头")
+            print("[ERROR] 无法打开摄像头")
             return
-        print(f"📷 {self.cam_w}×{self.cam_h}  |  🖱 鼠标点选标签  |  ␣ 录制  |  Q 退出")
+        print(f" {self.cam_w}×{self.cam_h}  |  鼠标点选标签  |   录制  |  Q 退出")
         cv2.namedWindow("CalibTool", cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback("CalibTool", self._on_mouse)
 
@@ -336,10 +363,19 @@ class CalibTool:
                 cv2.imshow("CalibTool", canvas)
 
                 key = cv2.waitKey(1) & 0xFF
+
+                # 非 Q 键 → 重置退出确认
+                if key != ord('q'):
+                    self._pending_quit = False
+
                 if key == ord('q'):
-                    if self.records:
-                        self._export_csv()
-                    break
+                    if self.records and not self._pending_quit:
+                        self._pending_quit = True
+                        print(f"Press Q again to quit ({len(self.records)} records will be auto-exported)")
+                    else:
+                        if self.records:
+                            self._export_csv()
+                        break
                 elif key == ord(' '):
                     self._toggle_recording()
                 elif key == ord('s'):
@@ -347,6 +383,9 @@ class CalibTool:
                 elif key == 9:          # Tab
                     self.selected_label_idx = (
                         (self.selected_label_idx + 1) % len(self.labels))
+                elif key == ord('b'):    # 上一个标签
+                    self.selected_label_idx = (
+                        (self.selected_label_idx - 1) % len(self.labels))
                 elif key == ord('1'):
                     self._switch_phase("EAR")
                 elif key == ord('2'):
@@ -357,12 +396,22 @@ class CalibTool:
                     self._export_csv()
                 elif key in (255, 8, 127):  # Delete / Backspace
                     self._delete_selected_record()
+                elif key == ord('h'):
+                    print("=== Keyboard Shortcuts ===")
+                    print("  1/2/3  - Switch phase (EAR/MAR/HEAD)")
+                    print("  Space  - Start/Stop recording")
+                    print("  Tab    - Next label")
+                    print("  B      - Previous label")
+                    print("  E      - Export CSV")
+                    print("  S      - Screenshot")
+                    print("  Q      - Quit (press twice to confirm)")
+                    print("  H      - This help")
         finally:
             self.cam.release()
             self.detector.close()
             self.logger.close()
             cv2.destroyAllWindows()
-            print("✅ 已释放资源")
+            print("[OK] 已释放资源")
 
     # ══════════════════════════════════════════════════════
     # 帧处理
@@ -378,6 +427,7 @@ class CalibTool:
 
         self.ear_left = self.ear_right = self.ear_avg = 0.0
         self.mar_val = 0.0
+        self.pitch = self.yaw = self.roll = 0.0
 
         if self.face_found:
             lm = self.detector.get_landmarks(results)
@@ -387,6 +437,10 @@ class CalibTool:
                 self.ear_left, self.ear_right, self.ear_avg = \
                     self.ear_smoother.update(el, er)
                 self.mar_val = self.mar_smoother.update(calculate_mar(lm))
+                # HeadPose
+                p, y, r = calculate_head_pose(lm, self.cam_w, self.cam_h)
+                self.pitch, self.yaw, self.roll = \
+                    self.head_pose_smoother.update(p, y, r)
 
         if self.recording:
             self.record_elapsed = time.time() - self.record_start
@@ -396,6 +450,9 @@ class CalibTool:
                 "ear_r": self.ear_right,
                 "ear_avg": self.ear_avg,
                 "mar": self.mar_val,
+                "pitch": self.pitch,
+                "yaw": self.yaw,
+                "roll": self.roll,
             })
 
     # ══════════════════════════════════════════════════════
@@ -407,8 +464,9 @@ class CalibTool:
         base = np.full((H, W, 3), CLR_BG, dtype=np.uint8)
         base[0:H, 0:self.cam_w] = frame
 
-        self._draw_top_bar(base)
-        self._draw_side_panel(base)
+        self._draw_top_bar(base)           # 只覆盖 0..cam_w
+        self._draw_side_panel(base)         # 覆盖 cam_w..canvas_w
+        self._draw_phase_buttons(base)      # 在侧面板之上绘制按钮，不被遮挡
         self._draw_bottom_bar(base)
 
         if self.recording:
@@ -421,9 +479,9 @@ class CalibTool:
     # ══════════════════════════════════════════════════════
 
     def _draw_top_bar(self, img):
-        _frosted_panel(img, 0, 0, self.canvas_w, TOP_BAR_H)
+        _frosted_panel(img, 0, 0, self.cam_w, TOP_BAR_H, alpha=0.94)
         # 底部分隔线
-        _rounded_rect(img, 0, TOP_BAR_H - 1, self.canvas_w, 1, 0, CLR_BORDER)
+        _rounded_rect(img, 0, TOP_BAR_H - 1, self.cam_w, 1, 0, CLR_BORDER)
         py = PAD
 
         # 第一行：状态
@@ -436,14 +494,23 @@ class CalibTool:
 
         # 第二行：实时数据
         if self.face_found:
-            _draw_text(img, f"EAR {self.ear_avg:.3f}", PAD, py + 32,
-                       SCALE_CAPTION, CLR_SUCCESS, 1)
-            _draw_text(img, f"MAR {self.mar_val:.3f}", PAD + 120, py + 32,
-                       SCALE_CAPTION, CLR_WARNING, 1)
+            if self.phase == "HEAD":
+                _draw_text(img, f"Pitch {self.pitch:.1f}  Yaw {self.yaw:.1f}  Roll {self.roll:.1f}",
+                           PAD, py + 32, SCALE_CAPTION, CLR_PRIMARY, 1)
+            else:
+                _draw_text(img, f"EAR {self.ear_avg:.3f}", PAD, py + 32,
+                           SCALE_CAPTION, CLR_SUCCESS, 1)
+                _draw_text(img, f"MAR {self.mar_val:.3f}", PAD + 120, py + 32,
+                           SCALE_CAPTION, CLR_WARNING, 1)
         else:
             _draw_text(img, "等待人脸…", PAD, py + 32, SCALE_SMALL, CLR_TEXT_DIM)
 
-        # 右侧：阶段切换按钮
+    # ══════════════════════════════════════════════════════
+    # 右上角阶段切换按钮（在侧面板之上绘制，不被磨砂遮挡）
+    # ══════════════════════════════════════════════════════
+
+    def _draw_phase_buttons(self, img):
+        """侧面板上层绘制 HEAD / MAR / EAR 三个按钮"""
         self._phase_btns.clear()
         px = self.canvas_w - PAD
         for ph in reversed(["HEAD", "MAR", "EAR"]):
@@ -453,6 +520,7 @@ class CalibTool:
             sel = (ph == self.phase)
             _draw_btn(img, px, PAD, bw, BTN_H, ph, sel)
             self._phase_btns.append((px, PAD, bw, BTN_H, ph))
+            px -= BTN_GAP  # 按钮间距
 
     # ══════════════════════════════════════════════════════
     # 底部栏
@@ -472,14 +540,14 @@ class CalibTool:
         if self.recording:
             # 录制中：红底白字，醒目
             _rounded_rect(img, rec_x, by_c, REC_W, BTN_H, CORNER_R, CLR_DANGER)
-            _draw_text(img, "⏹ 停止", rec_x + REC_W // 2, by_c + BTN_H // 2 + 5,
+            _draw_text(img, "[STOP] 停止", rec_x + REC_W // 2, by_c + BTN_H // 2 + 5,
                        SCALE_BODY, (255, 255, 255), 1, align="center")
         else:
             # 空闲：灰底灰字，低调
             _rounded_rect(img, rec_x, by_c, REC_W, BTN_H, CORNER_R,
                           CLR_SURFACE, alpha=0.5)
             _rounded_outline(img, rec_x, by_c, REC_W, BTN_H, CORNER_R, CLR_BORDER)
-            _draw_text(img, "⏺ 录制", rec_x + REC_W // 2, by_c + BTN_H // 2 + 5,
+            _draw_text(img, "[REC] 录制", rec_x + REC_W // 2, by_c + BTN_H // 2 + 5,
                        SCALE_BODY, CLR_TEXT_DIM, 1, align="center")
         self._rec_btn = (rec_x, by_c, REC_W, BTN_H)
 
@@ -522,21 +590,47 @@ class CalibTool:
         sep_y = TOP_BAR_H + PAD + 12
         _rounded_rect(img, sx + PAD, sep_y, SIDE_PANEL_W - PAD * 2, 1, 0, CLR_BORDER)
 
-        # 记录卡片列表（最新在上，最多 7 条）
-        visible = self.records[-7:]
-        self._card_rects.clear()
+        # 记录卡片列表（带滚轮翻页）
         card_h = 48
+        hint_y = self.canvas_h - BOTTOM_BAR_H - PAD
+        avail_h = hint_y - (sep_y + PAD_S) - PAD_S * 2
+        max_visible = max(1, int(avail_h // (card_h + PAD_S)))
+        self._max_side_cards = max_visible
+        total = len(self.records)
+
+        # 计算可见区间（最新记录在底部，滚轮向上看旧记录）
+        if total > max_visible:
+            self._scroll_offset = min(self._scroll_offset, total - max_visible)
+            start = total - max_visible - self._scroll_offset
+            visible = self.records[start:start + max_visible]
+        else:
+            self._scroll_offset = 0
+            visible = self.records[-max_visible:]
+
+        self._card_rects.clear()
         for i, rec in enumerate(reversed(visible)):
-            real_idx = len(self.records) - 1 - i
+            real_idx = total - 1 - i - self._scroll_offset
             cy = sep_y + PAD_S + i * (card_h + PAD_S)
             selected = (real_idx == self.selected_record_idx)
             _draw_card(img, sx + PAD, cy, SIDE_PANEL_W - PAD * 2, rec, selected)
             self._card_rects.append(
                 (sx + PAD, cy, SIDE_PANEL_W - PAD * 2, card_h, real_idx))
 
-        # 底部提示
-        hint_y = self.canvas_h - BOTTOM_BAR_H - PAD
-        if self.selected_record_idx >= 0:
+        # 滚动指示器
+        if total > max_visible:
+            indicator = ""
+            if self._scroll_offset < total - max_visible:
+                indicator += f"^ older({self._scroll_offset}) "
+            if self._scroll_offset > 0:
+                indicator += "v newer"
+            if indicator:
+                _draw_text(img, indicator.strip(), sx + PAD, sep_y - 4,
+                           SCALE_SMALL, CLR_WARNING, 1)
+
+        # 底部提示（hint_y 已在上面计算）
+        if self._pending_delete:
+            hint = "再次 Backspace 确认删除"
+        elif self.selected_record_idx >= 0:
             hint = "Backspace 删除选中"
         else:
             hint = "点击记录选中"
@@ -574,6 +668,15 @@ class CalibTool:
     # ══════════════════════════════════════════════════════
 
     def _on_mouse(self, event, x, y, flags, param):
+        # 滚轮翻页（侧面板记录列表）
+        if event == cv2.EVENT_MOUSEWHEEL:
+            max_scroll = max(0, len(self.records) - self._max_side_cards)
+            if flags > 0:
+                self._scroll_offset = max(0, self._scroll_offset - 1)
+            else:
+                self._scroll_offset = min(max_scroll, self._scroll_offset + 1)
+            return
+
         if event != cv2.EVENT_LBUTTONDOWN:
             return
 
@@ -606,6 +709,8 @@ class CalibTool:
         # 记录卡片（选中/取消）
         for bx, by, bw, bh, idx in self._card_rects:
             if bx <= x <= bx + bw and by <= y <= by + bh:
+                if self.selected_record_idx != idx:
+                    self._pending_delete = False  # 切换卡片时重置确认
                 self.selected_record_idx = -1 if self.selected_record_idx == idx else idx
                 return
 
@@ -617,10 +722,12 @@ class CalibTool:
         if ph == self.phase:
             return
         if self.recording:
+            print("[WARN] Switching phase while recording - recording stopped")
             self._stop_recording()
         self.phase = ph
         self.labels = PHASES[ph]
         self.selected_label_idx = 0
+        self._pending_delete = False
 
     def _toggle_recording(self):
         if self.recording:
@@ -633,7 +740,7 @@ class CalibTool:
         self.record_start = time.time()
         self.record_elapsed = 0.0
         self.record_frames.clear()
-        print(f"⏺ 开始录制 [{self.labels[self.selected_label_idx]}] …")
+        print(f"[REC] 开始录制 [{self.labels[self.selected_label_idx]}] …")
 
     def _stop_recording(self):
         if not self.recording:
@@ -643,13 +750,18 @@ class CalibTool:
         n = len(self.record_frames)
 
         if n < 5 or elapsed < 0.5:
-            print("⚠ 录制太短，已丢弃")
+            print("[WARN] 录制太短，已丢弃")
             self.record_frames.clear()
             return
 
         label = self.labels[self.selected_label_idx]
-        print(f"⏹ 停止录制 [{label}]  {elapsed:.1f}s  {n}帧")
-        self._compute_and_log(label, elapsed, n)
+        print(f"[STOP] 停止录制 [{label}]  {elapsed:.1f}s  {n}帧")
+        try:
+            self._compute_and_log(label, elapsed, n)
+        except Exception as e:
+            print(f"[ERROR] 数据处理异常: {e}")
+            import traceback
+            traceback.print_exc()
         self.record_frames.clear()
 
     def _compute_and_log(self, label, duration, n_frames):
@@ -672,10 +784,18 @@ class CalibTool:
             mn, mx, av = _stats("mar")
             metrics = {"MAR": (mn, mx, av)}
             print(f"  {'MAR':8s}  min={mn:.4f}  max={mx:.4f}  avg={av:.4f}")
-        else:  # HEAD (placeholder)
-            mn, mx, av = _stats("ear_avg")
-            metrics = {"Pitch": (mn, mx, av), "Yaw": (0, 0, 0), "Roll": (0, 0, 0)}
-            print(f"  (HEAD 暂用 EAR 占位)  avg={av:.4f}")
+        else:  # HEAD
+            pitch_stats = _stats("pitch")
+            yaw_stats = _stats("yaw")
+            roll_stats = _stats("roll")
+            metrics = {
+                "Pitch": pitch_stats,
+                "Yaw": yaw_stats,
+                "Roll": roll_stats,
+            }
+            print(f"  Pitch  min={pitch_stats[0]:.1f}  max={pitch_stats[1]:.1f}  avg={pitch_stats[2]:.1f}")
+            print(f"  Yaw    min={yaw_stats[0]:.1f}  max={yaw_stats[1]:.1f}  avg={yaw_stats[2]:.1f}")
+            print(f"  Roll   min={roll_stats[0]:.1f}  max={roll_stats[1]:.1f}  avg={roll_stats[2]:.1f}")
 
         first_key = list(metrics.keys())[0]
         summary = f"{metrics[first_key][2]:.3f}"
@@ -691,7 +811,7 @@ class CalibTool:
 
     def _export_csv(self):
         if not self.records:
-            print("⚠ 暂无记录可导出")
+            print("[WARN] 暂无记录可导出")
             return
         for rec in self.records:
             metrics = rec.get("_metrics", {})
@@ -700,22 +820,28 @@ class CalibTool:
                     rec["phase"], rec["label"],
                     rec["duration"], rec["frames"], metrics)
         filepath = self.logger._filepath
-        print(f"📤 已导出 {len(self.records)} 条 → {filepath}")
+        print(f"[EXPORT] 已导出 {len(self.records)} 条 → {filepath}")
 
     def _delete_selected_record(self):
         if self.selected_record_idx < 0 or \
            self.selected_record_idx >= len(self.records):
             return
+        if not self._pending_delete:
+            self._pending_delete = True
+            rec = self.records[self.selected_record_idx]
+            print(f"  Press Backspace again to DELETE [{rec['phase']}] {rec['label']}")
+            return
         rec = self.records.pop(self.selected_record_idx)
-        print(f"🗑 已删除 [{rec['phase']}] {rec['label']} ({rec['duration']:.1f}s)")
+        print(f"[DEL] Deleted [{rec['phase']}] {rec['label']} ({rec['duration']:.1f}s)")
         self.selected_record_idx = -1
+        self._pending_delete = False
 
     def _screenshot(self, canvas):
         os.makedirs("data/screenshots", exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         fname = f"data/screenshots/calib_{ts}.png"
         cv2.imwrite(fname, canvas)
-        print(f"📸 {fname}")
+        print(f"[SHOT] {fname}")
 
 
 # ══════════════════════════════════════════════════════════════

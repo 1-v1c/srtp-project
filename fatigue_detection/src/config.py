@@ -35,6 +35,7 @@ PERCLOS_THRESHOLD = 0.20      # 窗口内闭眼比例超过此值触发 PERCLOS 
 
 # ---- 头部姿态 ----
 PITCH_DOWN_THRESHOLD = 22     # Pitch 超过此角度判定为"低头"（度）
+PITCH_OFFSET = 0              # 正常看屏幕时的基线 pitch 值，用 CalibTool HEAD 模式测量后填入
 HEAD_DOWN_DURATION_SEC = 2.0  # 持续低头超过此秒数触发警告
 YAW_DEVIATION_THRESHOLD = 30  # Yaw 偏离正前方超过此角度（度）
 
@@ -60,9 +61,9 @@ ALERT_COOLDOWN_SEC = 5.0      # 两次报警最小间隔（防连续骚扰）
 LOG_DIR = "logs"              # CSV 日志保存目录
 
 # ---- MediaPipe 模型 ----
-# face_landmarker.task 模型文件路径
-# 注意: MediaPipe 的 C 库不支持中文路径，请放到纯英文路径下
-FACE_LANDMARKER_MODEL_PATH = "E:/ObsidianVault/fatigue_detection_models/face_landmarker.task"
+# 注意: MediaPipe 的底层 C 库不支持中文路径，模型必须放在纯英文路径下
+# 模型文件位置: E:\ObsidianVault\fatigue_detection_models\face_landmarker.task
+FACE_LANDMARKER_MODEL_PATH = "E:/ObsidianVault/.codex/face_landmarker.task"
 
 # ---- 可视化开关 ----
 SHOW_FACE_MESH = True         # 是否显示 Face Mesh 绿网

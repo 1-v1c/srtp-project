@@ -10,6 +10,7 @@ MediaPipe Face Mesh 关键点编号（旧版 468 点模型，新版 478 点前 4
   嘴部: 61(左角), 291(右角), 13(上唇), 14(下唇)
 """
 
+import cv2
 import numpy as np
 from collections import deque
 
@@ -140,3 +141,193 @@ class MARSmoother:
         """添加新值，返回平滑后的 MAR"""
         self.mar_values.append(mar)
         return float(np.mean(self.mar_values)) if self.mar_values else mar
+
+
+# ============================================================
+# Head Pose — 3D 头部姿态估计 (solvePnP)
+# ============================================================
+
+# 6 个参考点的 3D 坐标（通用人脸模型，单位 mm）
+# 原始 MediaPipe 模型是 Y 轴朝上；OpenCV solvePnP 使用 Y 轴朝下，故 Y 值取反
+_FACE_MODEL_3D = np.array([
+    (0.0, 0.0, 0.0),             #   1: 鼻尖
+    (0.0, 330.0, -65.0),         # 152: 下巴（在鼻尖下方 → Y 正）
+    (-225.0, -170.0, -135.0),    #  33: 左眼左眼角（在鼻尖上方 → Y 负）
+    (225.0, -170.0, -135.0),     # 263: 右眼右眼角
+    (-150.0, 150.0, -125.0),     #  61: 左嘴角（在鼻尖下方 → Y 正）
+    (150.0, 150.0, -125.0),      # 291: 右嘴角
+], dtype=np.float64)
+
+_FACE_LANDMARK_IDS = [1, 152, 33, 263, 61, 291]
+
+
+def _solve_head_pnp(landmarks, img_w, img_h):
+    """
+    执行 solvePnP 求解头部旋转 + 平移。
+
+    返回 (rvec, tvec, camera_matrix) 或 None。
+    """
+    # 提取 2D 像素坐标
+    img_points = []
+    for idx in _FACE_LANDMARK_IDS:
+        if idx >= len(landmarks):
+            return None
+        x, y = landmarks[idx]
+        img_points.append([x * img_w, y * img_h])
+
+    # 近似相机内参（无需精确标定）
+    focal_length = max(img_w, img_h)
+    camera_matrix = np.array([
+        [focal_length, 0, img_w / 2],
+        [0, focal_length, img_h / 2],
+        [0, 0, 1]
+    ], dtype=np.float64)
+
+    dist_coeffs = np.zeros((4, 1), dtype=np.float64)
+
+    try:
+        _, rvec, tvec = cv2.solvePnP(
+            _FACE_MODEL_3D,
+            np.array(img_points, dtype=np.float64),
+            camera_matrix,
+            dist_coeffs,
+            flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+        return rvec, tvec, camera_matrix
+    except cv2.error:
+        return None
+
+
+def calculate_head_pose(landmarks, img_w, img_h):
+    """
+    估计头部 3D 姿态。
+
+    参数:
+        landmarks: MediaPipe Face Mesh 478 个关键点 [(x,y), ...]
+        img_w, img_h: 图像宽高（像素）
+
+    返回:
+        (pitch, yaw, roll) 角度值，失败时返回 (0.0, 0.0, 0.0)
+
+    角度约定（可经实际测试调整符号）:
+        pitch > 0 = 低头
+        yaw   > 0 = 向左转
+        roll  > 0 = 向左歪头
+    """
+    result = _solve_head_pnp(landmarks, img_w, img_h)
+    if result is None:
+        return (0.0, 0.0, 0.0)
+
+    rvec, tvec, _ = result
+    rotation_matrix, _ = cv2.Rodrigues(rvec)
+
+    # 从旋转矩阵分解欧拉角（XYZ 约定）
+    # 正 pitch = 低头，正 yaw = 左转，正 roll = 左歪
+    pitch = -np.arctan2(rotation_matrix[2][1], rotation_matrix[2][2])
+    yaw   = np.arcsin(-rotation_matrix[2][0])
+    roll  = np.arctan2(rotation_matrix[1][0], rotation_matrix[0][0])
+
+    # 防 NaN：极端角度下 arcsin 可能产出 NaN，归零保护
+    if np.isnan(pitch) or np.isinf(pitch): pitch = 0.0
+    if np.isnan(yaw)   or np.isinf(yaw):   yaw   = 0.0
+    if np.isnan(roll)  or np.isinf(roll):  roll  = 0.0
+
+    return (float(np.degrees(pitch)),
+            float(np.degrees(yaw)),
+            float(np.degrees(roll)))
+
+
+def draw_head_axes(image, landmarks, img_w, img_h):
+    """
+    在面部绘制 RGB 3D 坐标轴（可视化头部朝向）。
+
+    颜色约定:
+        红色 = X 轴（人脸右侧）
+        绿色 = Y 轴（人脸下方）
+        蓝色 = Z 轴（人脸前方）
+    """
+    result = _solve_head_pnp(landmarks, img_w, img_h)
+    if result is None:
+        return
+
+    rvec, tvec, camera_matrix = result
+    dist_coeffs = np.zeros((4, 1), dtype=np.float64)
+
+    # 3D 坐标轴端点（从鼻尖出发，80mm 长）
+    axis_3d = np.float32([
+        [0, 0, 0],
+        [80, 0, 0],     # X
+        [0, -80, 0],    # Y（模型 Y 朝下，取反使绿色指向上方）
+        [0, 0, -80],    # Z（模型 Z 朝前，取反使蓝色指向画外）
+    ])
+
+    # 投影到 2D
+    axis_2d, _ = cv2.projectPoints(axis_3d, rvec, tvec, camera_matrix, dist_coeffs)
+
+    # 绘制
+    origin = tuple(axis_2d[0].ravel().astype(int))
+    cv2.line(image, origin, tuple(axis_2d[1].ravel().astype(int)), (0, 0, 255), 3)   # X: 红
+    cv2.line(image, origin, tuple(axis_2d[2].ravel().astype(int)), (0, 255, 0), 3)   # Y: 绿
+    cv2.line(image, origin, tuple(axis_2d[3].ravel().astype(int)), (255, 0, 0), 3)   # Z: 蓝
+
+
+class HeadPoseSmoother:
+    """滑动窗口平滑 Pitch / Yaw / Roll 三轴角度"""
+
+    def __init__(self, window_size: int = 5):
+        self.pitch = deque(maxlen=window_size)
+        self.yaw = deque(maxlen=window_size)
+        self.roll = deque(maxlen=window_size)
+
+    def update(self, pitch: float, yaw: float, roll: float) -> tuple:
+        """填入新值，返回平滑后的 (pitch, yaw, roll)"""
+        self.pitch.append(pitch)
+        self.yaw.append(yaw)
+        self.roll.append(roll)
+        return (
+            float(np.mean(self.pitch)),
+            float(np.mean(self.yaw)),
+            float(np.mean(self.roll)),
+        )
+
+
+class PERCLOSCounter:
+    """
+    滑动窗口闭眼比例统计器。
+
+    规则:
+    - EAR < ear_threshold 视为闭眼帧
+    - 无人脸帧用 update(None) 传入，跳过不计
+    - 窗口长度由 window_sec × fps 决定
+    """
+
+    def __init__(self, window_sec: int = 30, ear_threshold: float = 0.22, fps: int = 30):
+        self.window_sec = max(1, int(window_sec))
+        self.ear_threshold = ear_threshold
+        self.fps = max(1, int(fps))
+        self.window_frames = max(1, self.window_sec * self.fps)
+
+        # 保存每帧的闭眼状态 True/False
+        self._closed_states = deque(maxlen=self.window_frames)
+
+    def update(self, ear_value: float | None) -> None:
+        """
+        每帧调用一次。
+        ear_value 为 None 表示无人脸，跳过不计。
+        """
+        if ear_value is None:
+            return
+        self._closed_states.append(ear_value < self.ear_threshold)
+
+    def get_perclos(self) -> float:
+        """
+        返回当前窗口内的闭眼帧比例，取值 0.0 ~ 1.0。
+        窗口未满时，按已有数据计算，不做零填充。
+        """
+        if not self._closed_states:
+            return 0.0
+        return float(sum(self._closed_states) / len(self._closed_states))
+
+    def reset(self) -> None:
+        """清空窗口数据"""
+        self._closed_states.clear()
