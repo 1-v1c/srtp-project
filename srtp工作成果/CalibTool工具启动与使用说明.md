@@ -1,47 +1,64 @@
 ---
 title: CalibTool 启动与使用说明
-date: 2026-07-12
-tags: [srtp, calibtool, 工具]
+date: 2026-08-01
+tags: [srtp, calibtool, 工具, 数据采集]
 ---
 
-## CalibTool 启动方式
+> 本说明指向**整合版工具包**（桌面版 + 网页版已打包，含实验手册）。
+> 工具包位置：`01-Projects/SRTP项目—人车协同安全系统/fatigue_detection/CalibTool数据采集工具包/`
 
-### 方案一：双击 .bat（推荐）
-```
-E:\ObsidianVault\.codex\启动CalibTool.bat
-```
+## 一、推荐：工具包内启动
 
-### 方案二：PowerShell 命令行
-```powershell
-cd "E:\ObsidianVault\01-Projects\SRTP项目—人车协同安全系统\fatigue_detection\src"
-python calibtool.py
-```
+工具包自带启动器，路径全自动定位，**双击即用**（适合自己和队友）：
 
-### 方案三：桌面快捷方式
-目标位置填：
 ```
-D:\Anaconda3\local\python.exe "E:\ObsidianVault\.codex\launch_calibtool.py"
+CalibTool数据采集工具包/
+├── 启动CalibTool网页版.bat   ← ★ 推荐（浏览器界面，功能最全）
+├── 启动CalibTool桌面版.bat   ← 备用（OpenCV 窗口版）
+├── README.md                ← 使用说明 + 注意事项（队友先读这个）
+└── 实验流程手册.md           ← 标准实验规程（采集规范）
 ```
 
----
+### 网页版（推荐）
+双击 `启动CalibTool网页版.bat` → 自动起本地服务器 + 打开浏览器。
 
-## 快捷键
+### 桌面版（备用）
+双击 `启动CalibTool桌面版.bat` → OpenCV 窗口。
+（注意：桌面版 MediaPipe 不支持中文路径，启动器会自动把模型复制到纯英文临时目录处理，无需手动干预）
 
-| 按键 | 功能 |
-|:---|:------|
-| **空格** | 开始 / 停止录制 |
-| **Tab** | 前进到下一个标签 |
-| **B** | 回退到上一个标签 |
-| **1/2/3** | 切换阶段（EAR / MAR / HEAD） |
-| **E** | 导出 CSV 数据 |
-| **Backspace** | 删除选中记录（按两次确认） |
-| **Q** | 退出（按两次确认，自动导出） |
-| **H** | 查看帮助 |
-| **鼠标滚轮** | 侧面板记录列表滚动 |
+## 二、队友首次使用流程
 
----
+1. 安装 Python 3.10~3.12（64 位，勾选 Add to PATH）
+2. 工具包目录下执行：`python -m pip install -r requirements.txt`
+3. 双击 `启动CalibTool网页版.bat`
+4. 按《实验流程手册.md》执行采集
 
-## 安装环境（队友首次使用）
+## 三、开发者快捷启动（本机开发用）
+
 ```
-E:\ObsidianVault\.codex\安装环境.bat
+E:\ObsidianVault\.codex\启动CalibTool.bat      ← 旧版桌面启动器（仍可用）
 ```
+
+## 四、快捷键
+
+| 按键 | 网页版 | 桌面版 |
+|:---|:------|:------|
+| **空格** | 开始 / 停止录制 | ✅ |
+| **Tab / B** | 下一个 / 上一个标签 | ✅ |
+| **1/2/3** | 切换 EAR / MAR / HEAD | ✅ |
+| **E** | 导出 CSV | ✅ |
+| **H** | 帮助 | ✅ |
+| **滚轮** | 侧面板记录滚动 | ✅ |
+| Backspace | 删除记录（两次确认） | ✅ |
+| Q | — | 退出（两次确认） |
+
+## 五、采集规范速览（详见实验手册）
+
+- 每名受试者：EAR(5) + MAR(6) + HEAD(7) = **18 标签 × 3 次 × 5~10 秒**
+- 疲劳验证段：清醒段 / 疲劳段各 2 分钟 + KSS 量表记录
+- 数据命名：`YYMMDD_受试者ID_模式_序号.csv`
+
+## 六、相关文件
+
+- 实验手册：[[CalibTool数据采集工具包/实验流程手册.md]]（工具包内）
+- 数据采集工具包：`fatigue_detection/CalibTool数据采集工具包/`
