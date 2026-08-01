@@ -22,6 +22,7 @@ Thumbs.db
 # Project data (screenshots are personal, CSVs are calibration outputs)
 data/screenshots/
 data/calibration/
+data/logs/
 
 # Model file (downloaded separately, not in repo)
 # Uncomment if model is too large:

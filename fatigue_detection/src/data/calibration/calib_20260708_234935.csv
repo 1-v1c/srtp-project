@@ -1,4 +1,0 @@
-﻿timestamp,phase,label,duration_s,frames,metric,min,max,avg
-23:49:47,HEAD,右倾,2.8,83,Pitch,2.0909,2.8348,2.4651
-23:49:47,HEAD,右倾,2.8,83,Yaw,32.6848,34.7708,33.6154
-23:49:47,HEAD,右倾,2.8,83,Roll,-141.5805,-140.8514,-141.2401

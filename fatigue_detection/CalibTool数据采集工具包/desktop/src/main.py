@@ -3,13 +3,18 @@
 Phase 1: 摄像头 + Face Mesh 人脸关键点
 Phase 2: + EAR 眼部长宽比实时显示
 Phase 3: + MAR 嘴部长宽比 + 哈欠计时
+Phase 4: + HeadPose 头部姿态
+Phase 5: + PERCLOS 时间窗口统计（眨眼豁免）
+Phase 6: + 疲劳评分融合（L0~L3 状态机）+ 报警 + 运行日志
+Phase 7: + 眨眼动力学特征（疲劳早期信号）
 
-按 'q' 退出 | 按 's' 截图
+按 'q' 退出 | 按 's' 截图 | 按 'r' 重置疲劳评分
 """
 
 import os
-import cv2
+import csv
 import time
+import cv2
 
 from camera import Camera
 from detector import FaceMeshDetector
@@ -17,16 +22,35 @@ from features import (
     calculate_ear, calculate_mar,
     calculate_head_pose, draw_head_axes,
     LEFT_EYE_INDICES, RIGHT_EYE_INDICES,
-    EARSmoother, MARSmoother, HeadPoseSmoother, PERCLOSCounter,
+    EARSmoother, MARSmoother, HeadPoseSmoother, PERCLOSCounter, BlinkAnalyzer,
 )
+from fatigue import FatigueScorer
 from config import (
     EAR_THRESHOLD, EAR_CONSECUTIVE_FRAMES,
     MAR_THRESHOLD, MAR_YAWN_DURATION_SEC, MAR_YAWN_GRACE_SEC,
     PITCH_DOWN_THRESHOLD, HEAD_DOWN_DURATION_SEC, YAW_DEVIATION_THRESHOLD,
-    PITCH_OFFSET,
+    YAW_DEVIATION_DURATION_SEC, PITCH_OFFSET,
     SHOW_FACE_MESH, SHOW_EYE_POINTS, SHOW_MOUTH_POINTS, SHOW_HEAD_POSE_AXIS,
-    PERCLOS_WINDOW_SEC, PERCLOS_THRESHOLD,
+    PERCLOS_WINDOW_SEC, PERCLOS_THRESHOLD, BLINK_EXEMPT_SEC,
+    SLOW_BLINK_SEC, BLINK_WINDOW_SEC,
+    BLINK_RATE_THRESHOLD, AVG_BLINK_DUR_THRESHOLD, SLOW_BLINK_RATE_THRESHOLD,
+    MICRO_SLEEP_SEC, ALERT_COOLDOWN_SEC, LOG_DIR, SCREENSHOT_DIR,
 )
+
+# 报警蜂鸣（仅 Windows 可用，非 Windows 自动跳过）
+try:
+    import winsound
+    _HAS_SOUND = True
+except ImportError:
+    _HAS_SOUND = False
+
+# 等级 → 显示颜色 (BGR)
+LEVEL_COLORS = {
+    0: None,
+    1: (0, 200, 255),    # 黄
+    2: (0, 140, 255),    # 橙
+    3: (0, 0, 255),      # 红
+}
 
 
 def main():
@@ -47,9 +71,37 @@ def main():
     mar_smoother = MARSmoother(window_size=5)
     head_pose_smoother = HeadPoseSmoother(window_size=5)
     perclos_counter = PERCLOSCounter(
-    window_sec=PERCLOS_WINDOW_SEC,
-    ear_threshold=EAR_THRESHOLD,
-    fps=30,)
+        window_sec=PERCLOS_WINDOW_SEC,
+        ear_threshold=EAR_THRESHOLD,
+        fps=30,
+        blink_exempt_sec=BLINK_EXEMPT_SEC,   # 眨眼豁免（<0.3s 不计入闭眼）
+    )
+
+    # 眨眼动力学分析器（P0 升级：疲劳早期信号）
+    blink_analyzer = BlinkAnalyzer(
+        ear_threshold=EAR_THRESHOLD,
+        window_sec=BLINK_WINDOW_SEC,
+        slow_blink_sec=SLOW_BLINK_SEC,
+        long_closure_sec=MICRO_SLEEP_SEC,   # ≥2s 视为长闭眼，不计眨眼
+    )
+
+    # 疲劳评分器（模块 07）
+    scorer = FatigueScorer()
+
+    # 运行日志（每秒快照写入 CSV）
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_path = os.path.join(LOG_DIR, f"run_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    log_file = open(log_path, "w", newline="", encoding="utf-8-sig")
+    log_writer = csv.writer(log_file)
+    log_writer.writerow([
+        "t", "score", "level", "ear_avg", "mar", "perclos",
+        "pitch", "yaw", "roll",
+        "blink_rate", "blink_dur",
+        "src_eye_close", "src_micro_sleep", "src_perclos",
+        "src_yawn", "src_yawn_freq", "src_head_down", "src_yaw_dev",
+        "src_blink_rate", "src_blink_dur",
+    ])
+    print(f"[LOG] 运行日志: {log_path}")
 
     # 哈欠计时器
     yawn_start_time = None       # 开始张嘴的时间戳
@@ -60,6 +112,18 @@ def main():
     # EAR 持续闭眼计数器
     eye_closed_counter = 0
 
+    # 状态计时（持续低/偏头）
+    head_down_start = None       # 开始低头的时间戳
+    yaw_dev_start = None         # 开始偏头的时间戳
+
+    # 报警状态
+    last_alert_level = 0         # 上一次报警等级（用于蜂鸣触发）
+    last_alert_time = 0.0        # 上一次报警时间（冷却）
+    last_log_time = 0.0          # 上一次日志写入时间
+    _t0 = time.time()            # 程序启动时间（日志时间基准）
+
+    print("[OK] 疲劳评分器就绪。按 r 重置评分，q 退出\n")
+
     # ── 主循环 ──────────────────────────────
     while True:
         ret, frame = cam.read()
@@ -68,6 +132,8 @@ def main():
 
         frame = cv2.flip(frame, 1)
         h, w = frame.shape[:2]
+        fps = cam.fps if cam.fps > 0 else 30
+        dt = 1.0 / fps          # 帧间隔（秒），用于评分器累积
 
         # 检测
         results = detector.detect(frame)
@@ -87,10 +153,11 @@ def main():
             landmarks = detector.get_landmarks(results)
 
             if len(landmarks) >= 478:
-                # --- EAR ---
-                ear_left = calculate_ear(landmarks, LEFT_EYE_INDICES)
-                ear_right = calculate_ear(landmarks, RIGHT_EYE_INDICES)
-                ear_left, ear_right, ear_avg = ear_smoother.update(ear_left, ear_right)
+                # --- EAR（原始值用于眨眼检测，平滑值用于状态判定）---
+                ear_left_raw = calculate_ear(landmarks, LEFT_EYE_INDICES)
+                ear_right_raw = calculate_ear(landmarks, RIGHT_EYE_INDICES)
+                ear_left, ear_right, ear_avg = ear_smoother.update(ear_left_raw, ear_right_raw)
+                blink_analyzer.update((ear_left_raw + ear_right_raw) / 2, time.time())
                 perclos_counter.update(ear_avg if face_found else None)
                 perclos_value = perclos_counter.get_perclos()
 
@@ -108,12 +175,16 @@ def main():
                 pitch, yaw, roll = calculate_head_pose(landmarks, w, h)
                 pitch, yaw, roll = head_pose_smoother.update(pitch, yaw, roll)
 
+        else:
+            # 无人脸：重置眨眼闭合状态，避免被误判为持续闭眼
+            blink_analyzer.update(None, time.time())
+
         # ── 哈欠检测状态机 ────────────────────
-        fps = cam.fps if cam.fps > 0 else 30
         mar_over_threshold = mar_val > MAR_THRESHOLD
 
         yawn_elapsed = 0.0
-        in_gap = False  # 是否处于宽容缓冲中
+        in_gap = False           # 是否处于宽容缓冲中
+        yawn_just_completed = False  # 本帧刚确认一次新哈欠（事件标志）
 
         if mar_over_threshold:
             # 回到阈值以上 → 清除缓冲标记
@@ -125,6 +196,7 @@ def main():
             if yawn_elapsed >= MAR_YAWN_DURATION_SEC and not yawn_in_progress:
                 yawn_count += 1
                 yawn_in_progress = True
+                yawn_just_completed = True
                 print(f"[YAWN] 检测到哈欠 #{yawn_count}！（MAR={mar_val:.3f}, 持续{yawn_elapsed:.1f}s）")
         else:
             # MAR 低于阈值 → 启动宽容缓冲，不立刻重置
@@ -143,6 +215,84 @@ def main():
                     # 还在缓冲期内 → 计时继续累积，假装没中断
                     yawn_elapsed = time.time() - yawn_start_time
                     in_gap = True
+
+        # ── 状态计时（低头 / 偏头）────────────
+        effective_pitch = pitch - PITCH_OFFSET   # 扣掉坐姿基线的有效低头角
+
+        if face_found and effective_pitch > PITCH_DOWN_THRESHOLD:
+            head_down_start = head_down_start if head_down_start is not None else time.time()
+        else:
+            head_down_start = None
+        head_down = (
+            head_down_start is not None
+            and (time.time() - head_down_start) >= HEAD_DOWN_DURATION_SEC
+        )
+
+        if face_found and abs(yaw) > YAW_DEVIATION_THRESHOLD:
+            yaw_dev_start = yaw_dev_start if yaw_dev_start is not None else time.time()
+        else:
+            yaw_dev_start = None
+        yaw_dev = (
+            yaw_dev_start is not None
+            and (time.time() - yaw_dev_start) >= YAW_DEVIATION_DURATION_SEC
+        )
+
+        # ── 疲劳评分器更新（模块 07）──────────
+        eye_closed_sec = eye_closed_counter / fps if face_found else 0.0
+        perclos_over = face_found and perclos_value > PERCLOS_THRESHOLD
+
+        # 眨眼统计（疲劳早期信号）
+        blink_stats = blink_analyzer.get_stats()
+        blink_rate_over = blink_stats["blink_rate"] >= BLINK_RATE_THRESHOLD
+        blink_dur_over = (
+            blink_stats["avg_duration"] >= AVG_BLINK_DUR_THRESHOLD
+            or blink_stats["slow_blink_rate"] >= SLOW_BLINK_RATE_THRESHOLD
+        )
+
+        scorer.update(dt, {
+            "eye_closed_sec": eye_closed_sec,
+            "yawn_just_completed": yawn_just_completed,
+            "perclos_over": perclos_over,
+            "head_down": head_down,
+            "yaw_dev": yaw_dev,
+            "blink_rate_over": blink_rate_over,
+            "blink_dur_over": blink_dur_over,
+        })
+        fatigue_score = scorer.get_score()
+        fatigue_level, fatigue_label = scorer.get_level()
+        active_sources = scorer.get_active_sources()
+
+        # 报警蜂鸣（等级提升或处于 L2/L3 且冷却结束）
+        now = time.time()
+        if fatigue_level >= 2 and fatigue_level > last_alert_level:
+            last_alert_level = fatigue_level
+            last_alert_time = now
+            if _HAS_SOUND:
+                winsound.Beep(1500 if fatigue_level == 2 else 2200, 400)
+                print(f"[ALERT] {fatigue_label}！分数={fatigue_score:.1f} 来源={[s[0] for s in active_sources]}")
+        elif fatigue_level < 2:
+            last_alert_level = fatigue_level
+        elif fatigue_level >= 2 and now - last_alert_time >= ALERT_COOLDOWN_SEC:
+            last_alert_time = now
+            if _HAS_SOUND:
+                winsound.Beep(1000, 200)
+
+        # 运行日志：每秒快照一行
+        if now - last_log_time >= 1.0:
+            last_log_time = now
+            src = {n: 0.0 for n in scorer._sources}
+            for n, v in active_sources:
+                src[n] = v
+            log_writer.writerow([
+                f"{now - _t0:.1f}", f"{fatigue_score:.2f}", fatigue_level,
+                f"{ear_avg:.4f}", f"{mar_val:.4f}", f"{perclos_value:.3f}",
+                f"{pitch:.1f}", f"{yaw:.1f}", f"{roll:.1f}",
+                f"{blink_stats['blink_rate']:.1f}", f"{blink_stats['avg_duration']:.3f}",
+                f"{src['eye_close']:.2f}", f"{src['micro_sleep']:.2f}", f"{src['perclos']:.2f}",
+                f"{src['yawn']:.2f}", f"{src['yawn_freq']:.2f}", f"{src['head_down']:.2f}", f"{src['yaw_dev']:.2f}",
+                f"{src['blink_rate']:.2f}", f"{src['blink_dur']:.2f}",
+            ])
+            log_file.flush()
 
         # ── 画面显示 ──────────────────────────
         y_offset = 30
@@ -206,17 +356,48 @@ def main():
             if yawn_count > 0:
                 cv2.putText(frame, f"Yawns: {yawn_count}", (10, y_offset),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 2)
+        y_offset += 6
+
+        # ── PERCLOS 显示 ───────────────────────
+        if face_found:
+            perclos_color = (0, 0, 255) if perclos_over else (0, 255, 255)
+            cv2.putText(frame, f"PERCLOS: {perclos_value:.2f}  ({PERCLOS_WINDOW_SEC}s)", (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, perclos_color, 2)
+            y_offset += 22
+
+            if perclos_over:
+                cv2.putText(frame, "PERCLOS ALERT!", (10, y_offset),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                y_offset += 22
+
+        # ── 眨眼统计显示（P0：疲劳早期信号）────
+        if face_found:
+            blink_color = (0, 0, 255) if (blink_rate_over or blink_dur_over) else (0, 255, 255)
+            cv2.putText(
+                frame,
+                f"Blink: {blink_stats['blink_rate']:.0f}/min dur {blink_stats['avg_duration']*1000:.0f}ms",
+                (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, blink_color, 2)
+            y_offset += 22
+
+        # ── 疲劳评分显示 ───────────────────────
+        score_color = LEVEL_COLORS[fatigue_level] or (255, 255, 255)
+        cv2.putText(frame, f"Fatigue: {fatigue_score:.1f}  {fatigue_label}",
+                    (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.55, score_color, 2)
+        y_offset += 22
+
+        if active_sources:
+            src_text = "+".join(f"{n}:{v:.1f}" for n, v in active_sources[:4])
+            cv2.putText(frame, f"  src: {src_text}", (10, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
         # ── HeadPose 显示 ──────────────────────
         if face_found and len(landmarks) >= 478:
             y_offset += 6
 
-            # 基线校准：实际低头角 = pitch - 正常坐姿基线
-            effective_pitch = pitch - PITCH_OFFSET
-
             # 角度数值
             pitch_color = (0, 0, 255) if effective_pitch > PITCH_DOWN_THRESHOLD else (0, 255, 255) if abs(effective_pitch) < 10 else (0, 165, 255)
             yaw_color   = (0, 0, 255) if abs(yaw) > YAW_DEVIATION_THRESHOLD else (0, 255, 255)
+
             cv2.putText(frame, f"Pitch: {pitch:.1f} ({effective_pitch:+.1f})  Yaw: {yaw:.1f}  Roll: {roll:.1f}",
                         (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, pitch_color, 2)
             y_offset += 22
@@ -252,6 +433,19 @@ def main():
                 px, py = int(x * w), int(y * h)
                 cv2.circle(frame, (px, py), 2, (0, 255, 255), -1)
 
+        # ── 顶部报警横幅（等级 ≥ L1 时显示）────
+        if fatigue_level >= 1:
+            banner_color = LEVEL_COLORS[fatigue_level]
+            flash = (fatigue_level == 3 and int(time.time() * 2) % 2 == 0)
+            if flash:
+                banner_color = (255, 255, 255)  # L3 红白闪烁
+            cv2.rectangle(frame, (0, 0), (w, 36), banner_color, -1)
+            banner_text = f"{fatigue_label}  Score:{fatigue_score:.1f}"
+            if active_sources:
+                banner_text += "  |  " + " ".join(n for n, _ in active_sources[:4])
+            cv2.putText(frame, banner_text, (w // 2 - 220, 26),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+
         cv2.imshow("Fatigue Detection", frame)
 
         # ── 按键 ──────────────────────────────
@@ -260,17 +454,21 @@ def main():
             print("[EXIT] 退出")
             break
         elif key == ord('s'):
-            os.makedirs("data/screenshots", exist_ok=True)
+            os.makedirs(SCREENSHOT_DIR, exist_ok=True)
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-            filename = f"data/screenshots/MAR_{timestamp}.png"
+            filename = os.path.join(SCREENSHOT_DIR, f"MAR_{timestamp}.png")
             cv2.imwrite(filename, frame)
             print(f"[SHOT] 截图: {filename}")
+        elif key == ord('r'):
+            scorer.reset()
+            print("[RESET] 疲劳评分已重置")
 
     # ── 清理 ────────────────────────────────
     cam.release()
     detector.close()
+    log_file.close()
     cv2.destroyAllWindows()
-    print("[OK] 已释放所有资源")
+    print(f"[OK] 已释放所有资源，运行日志已保存: {log_path}")
 
 
 if __name__ == "__main__":

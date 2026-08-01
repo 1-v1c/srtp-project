@@ -10,6 +10,7 @@ MediaPipe Face Mesh 关键点编号（旧版 468 点模型，新版 478 点前 4
   嘴部: 61(左角), 291(右角), 13(上唇), 14(下唇)
 """
 
+import time
 import cv2
 import numpy as np
 from collections import deque
@@ -299,16 +300,24 @@ class PERCLOSCounter:
     - EAR < ear_threshold 视为闭眼帧
     - 无人脸帧用 update(None) 传入，跳过不计
     - 窗口长度由 window_sec × fps 决定
+    - 眨眼豁免：闭眼持续 < blink_exempt_sec 视为正常眨眼，不计入闭眼帧
+      （对齐文献标准：PERCLOS 统计排除正常眨眼）
     """
 
-    def __init__(self, window_sec: int = 30, ear_threshold: float = 0.22, fps: int = 30):
+    def __init__(self, window_sec: int = 30, ear_threshold: float = 0.22, fps: int = 30,
+                 blink_exempt_sec: float = 0.3):
         self.window_sec = max(1, int(window_sec))
         self.ear_threshold = ear_threshold
         self.fps = max(1, int(fps))
         self.window_frames = max(1, self.window_sec * self.fps)
+        self.blink_exempt_frames = max(0, int(blink_exempt_sec * self.fps))
 
         # 保存每帧的闭眼状态 True/False
         self._closed_states = deque(maxlen=self.window_frames)
+
+        # 眨眼豁免状态：记录当前闭眼会话的起始位置，未超过豁免帧数前可回溯豁免
+        self._pending_start: int | None = None      # 闭眼开始帧在队列中的位置
+        self._pending_committed = False             # 闭眼已超过豁免帧数（转正，不再回溯）
 
     def update(self, ear_value: float | None) -> None:
         """
@@ -317,12 +326,36 @@ class PERCLOSCounter:
         """
         if ear_value is None:
             return
-        self._closed_states.append(ear_value < self.ear_threshold)
+        closed = ear_value < self.ear_threshold
+
+        # 先按原始状态入队（保证窗口帧数完整）
+        self._closed_states.append(closed)
+
+        if closed:
+            if self._pending_start is None:
+                # 闭眼会话开始
+                self._pending_start = len(self._closed_states) - 1
+                self._pending_committed = False
+            elif not self._pending_committed and (
+                len(self._closed_states) - self._pending_start >= self.blink_exempt_frames
+            ):
+                # 闭眼持续超过豁免帧数 → 转正（此前的帧保持 True，不再修改）
+                self._pending_committed = True
+        else:
+            # 睁眼：若闭眼会话在豁免期内结束 → 视为眨眼，回溯豁免
+            if self._pending_start is not None and not self._pending_committed:
+                start = max(0, self._pending_start)
+                # 当前睁眼帧保留 False，回溯修改闭眼会话期间的帧
+                for i in range(start, len(self._closed_states) - 1):
+                    self._closed_states[i] = False
+            self._pending_start = None
+            self._pending_committed = False
 
     def get_perclos(self) -> float:
         """
         返回当前窗口内的闭眼帧比例，取值 0.0 ~ 1.0。
         窗口未满时，按已有数据计算，不做零填充。
+        正常眨眼（< 豁免期）不计入闭眼。
         """
         if not self._closed_states:
             return 0.0
@@ -331,3 +364,120 @@ class PERCLOSCounter:
     def reset(self) -> None:
         """清空窗口数据"""
         self._closed_states.clear()
+        self._pending_start = None
+        self._pending_committed = False
+
+
+# ============================================================
+# 眨眼动力学分析器（P0 升级）
+# 从 EAR 时间序列检测眨眼，统计疲劳早期信号：
+#   - 眨眼频率（次/分）：疲劳时升高
+#   - 平均眨眼时长：疲劳时延长（正常 ~200ms，疲劳 >400ms）
+#   - 慢眨眼频率（≥ slow_blink_sec）：疲劳时增多
+#   - 平均闭合速度：疲劳时变慢（眼睑闭合缓慢，文献 AVR 信号）
+# ============================================================
+
+class BlinkAnalyzer:
+    """
+    眨眼动力学分析器。
+
+    眨眼检测状态机：
+        open → (ear < threshold) → closed → (ear ≥ threshold) → 完成一次眨眼
+    闭眼时长分档：
+        < slow_blink_sec           → 正常眨眼（计入统计）
+        slow_blink_sec ~ long_closure_sec → 慢眨眼（疲劳信号，计入统计）
+        ≥ long_closure_sec         → 长闭眼/微睡眠（不计为眨眼，由闭眼逻辑处理）
+
+    用法（每帧调用，t 用 time.time()）：
+        analyzer.update(ear_raw, time.time())   # ear 为未平滑的原始值
+        stats = analyzer.get_stats()            # 60s 窗口统计
+    """
+
+    def __init__(self, ear_threshold: float = 0.22, window_sec: float = 60.0,
+                 slow_blink_sec: float = 0.5, long_closure_sec: float = 2.0,
+                 history_len: int = 15):
+        self._threshold = ear_threshold
+        self._window_sec = max(1.0, window_sec)
+        self._slow_blink_sec = slow_blink_sec
+        self._long_closure_sec = max(slow_blink_sec, long_closure_sec)
+
+        # (t, ear) 历史缓冲：用于计算闭合速度（峰值 → 跌破阈值）
+        self._history = deque(maxlen=history_len)
+        # 眨眼事件：(完成时间, 持续时长, 闭合速度)
+        self._blinks: deque = deque()
+        self._state = "open"          # open / closed
+        self._closed_t0: float | None = None   # 跌破阈值的时刻
+
+    def update(self, ear: float | None, t: float) -> None:
+        """每帧调用。ear=None 表示无人脸，重置闭合状态。"""
+        if ear is None:
+            self._state = "open"
+            self._closed_t0 = None
+            self._history.clear()
+            return
+
+        self._history.append((t, ear))
+
+        if self._state == "open":
+            if ear < self._threshold:
+                self._state = "closed"
+                self._closed_t0 = t
+        else:  # closed
+            if ear >= self._threshold:
+                # 眨眼/长闭眼结束
+                duration = t - self._closed_t0
+                if duration < self._long_closure_sec:
+                    # 正常眨眼 / 慢眨眼 → 记录事件（长闭眼不计为眨眼）
+                    self._blinks.append((t, duration, self._calc_closing_speed()))
+                self._state = "open"
+                self._closed_t0 = None
+
+    def _calc_closing_speed(self) -> float:
+        """
+        计算本次闭眼的闭合速度：EAR 从峰值跌到阈值以下的速度。
+        近似：speed = (peak_ear - threshold) / 闭合时间
+        """
+        peak_ear = -1.0
+        peak_t = None
+        for h_t, h_ear in self._history:
+            if h_ear > peak_ear:
+                peak_ear = h_ear
+                peak_t = h_t
+        if peak_t is None or self._closed_t0 is None or peak_ear <= self._threshold:
+            return 0.0
+        closing_time = self._closed_t0 - peak_t
+        if closing_time <= 0:
+            return 0.0
+        return (peak_ear - self._threshold) / closing_time
+
+    def get_stats(self, now: float | None = None) -> dict:
+        """
+        返回滑动窗口内的眨眼统计：
+        {blink_rate(次/分), avg_duration(秒), slow_blink_rate(次/分), avg_closing_speed(EAR/秒)}
+        """
+        now = now if now is not None else time.time()
+        recent = [(t, d, s) for t, d, s in self._blinks if now - t <= self._window_sec]
+        if not recent:
+            return {
+                "blink_rate": 0.0,
+                "avg_duration": 0.0,
+                "slow_blink_rate": 0.0,
+                "avg_closing_speed": 0.0,
+            }
+        per_min = 60.0 / self._window_sec
+        avg_dur = sum(d for _, d, _ in recent) / len(recent)
+        slow_rate = sum(1 for _, d, _ in recent if d >= self._slow_blink_sec) * per_min
+        speeds = [s for _, _, s in recent if s > 0]
+        return {
+            "blink_rate": len(recent) * per_min,
+            "avg_duration": avg_dur,
+            "slow_blink_rate": slow_rate,
+            "avg_closing_speed": sum(speeds) / len(speeds) if speeds else 0.0,
+        }
+
+    def reset(self) -> None:
+        """清空全部状态"""
+        self._blinks.clear()
+        self._history.clear()
+        self._state = "open"
+        self._closed_t0 = None
