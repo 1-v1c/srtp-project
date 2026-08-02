@@ -15,7 +15,17 @@ WEB_DIR = os.path.join(BASE, "web")
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
-    """带 MIME 修正的静态文件处理器（.mjs/.wasm 必须正确标注）"""
+    """带 MIME 修正 + /models/ 跨目录映射的静态文件处理器（.mjs/.wasm 必须正确标注）"""
+
+    def translate_path(self, path):
+        # 模型文件统一放在工具包根目录 models/（web/ 之外），
+        # 页面请求 /models/face_landmarker.task 时映射到包根，避免 404
+        if path.startswith("/models/"):
+            mapped = os.path.normpath(os.path.join(BASE, path.lstrip("/")))
+            models_root = os.path.join(BASE, "models")
+            if mapped.startswith(models_root + os.sep):
+                return mapped
+        return super().translate_path(path)
 
     def guess_type(self, path):
         if path.endswith(".mjs"):
