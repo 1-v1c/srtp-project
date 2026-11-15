@@ -47,7 +47,7 @@ def compute_brake(fatigue_level,
                   a_driver):
     config = BrakeConfig()
 
-    # ========== 根据疲劳等级动态放大TTC阈值 ==========
+    # ========== 根据疲劳等级动态放大TTC阈值 ===========
     scale = config.FATIGUE_TTC_SCALE[fatigue_level]
     TTC_EMERGENCY = config.BASE_TTC_EMERGENCY * scale
     TTC_PARTIAL   = config.BASE_TTC_PARTIAL * scale
