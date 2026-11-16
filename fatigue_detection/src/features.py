@@ -122,6 +122,10 @@ class EARSmoother:
         self.left_ear = deque(maxlen=window_size)
         self.right_ear = deque(maxlen=window_size)
 
+    def reset(self):
+        self.left_ear.clear()
+        self.right_ear.clear()
+
     def update(self, left: float, right: float) -> tuple:
         """添加新值，返回平滑后的 (left_ear, right_ear, avg_ear)"""
         self.left_ear.append(left)
@@ -137,6 +141,9 @@ class MARSmoother:
 
     def __init__(self, window_size: int = 5):
         self.mar_values = deque(maxlen=window_size)
+
+    def reset(self):
+        self.mar_values.clear()
 
     def update(self, mar: float) -> float:
         """添加新值，返回平滑后的 MAR"""
@@ -187,19 +194,21 @@ def _solve_head_pnp(landmarks, img_w, img_h):
     dist_coeffs = np.zeros((4, 1), dtype=np.float64)
 
     try:
-        _, rvec, tvec = cv2.solvePnP(
+        success, rvec, tvec = cv2.solvePnP(
             _FACE_MODEL_3D,
             np.array(img_points, dtype=np.float64),
             camera_matrix,
             dist_coeffs,
             flags=cv2.SOLVEPNP_ITERATIVE,
         )
+        if not success or not np.isfinite(rvec).all() or not np.isfinite(tvec).all():
+            return None
         return rvec, tvec, camera_matrix
     except cv2.error:
         return None
 
 
-def calculate_head_pose(landmarks, img_w, img_h):
+def calculate_head_pose(landmarks, img_w, img_h, *, invalid_as_none=False):
     """
     估计头部 3D 姿态。
 
@@ -208,7 +217,7 @@ def calculate_head_pose(landmarks, img_w, img_h):
         img_w, img_h: 图像宽高（像素）
 
     返回:
-        (pitch, yaw, roll) 角度值，失败时返回 (0.0, 0.0, 0.0)
+        (pitch, yaw, roll) 角度值，失败时返回 (0.0, 0.0, 0.0)，invalid_as_none=True 时返回 None
 
     角度约定（可经实际测试调整符号）:
         pitch > 0 = 低头
@@ -217,7 +226,7 @@ def calculate_head_pose(landmarks, img_w, img_h):
     """
     result = _solve_head_pnp(landmarks, img_w, img_h)
     if result is None:
-        return (0.0, 0.0, 0.0)
+        return None if invalid_as_none else (0.0, 0.0, 0.0)
 
     rvec, tvec, _ = result
     rotation_matrix, _ = cv2.Rodrigues(rvec)
@@ -225,7 +234,7 @@ def calculate_head_pose(landmarks, img_w, img_h):
     # 从旋转矩阵分解欧拉角（XYZ 约定）
     # 正 pitch = 低头，正 yaw = 左转，正 roll = 左歪
     pitch = -np.arctan2(rotation_matrix[2][1], rotation_matrix[2][2])
-    yaw   = np.arcsin(-rotation_matrix[2][0])
+    yaw   = np.arcsin(np.clip(-rotation_matrix[2][0], -1.0, 1.0))
     roll  = np.arctan2(rotation_matrix[1][0], rotation_matrix[0][0])
 
     # 防 NaN：极端角度下 arcsin 可能产出 NaN，归零保护
@@ -280,6 +289,11 @@ class HeadPoseSmoother:
         self.yaw = deque(maxlen=window_size)
         self.roll = deque(maxlen=window_size)
 
+    def reset(self):
+        self.pitch.clear()
+        self.yaw.clear()
+        self.roll.clear()
+
     def update(self, pitch: float, yaw: float, roll: float) -> tuple:
         """填入新值，返回平滑后的 (pitch, yaw, roll)"""
         self.pitch.append(pitch)
@@ -293,79 +307,71 @@ class HeadPoseSmoother:
 
 
 class PERCLOSCounter:
-    """
-    滑动窗口闭眼比例统计器。
+    """按墙钟窗内的有效观测时长统计闭眼比例，连续闭眼达豁免时长后才计入。
 
-    规则:
-    - EAR < ear_threshold 视为闭眼帧
-    - 无人脸帧用 update(None) 传入，跳过不计
-    - 窗口长度由 window_sec × fps 决定
-    - 眨眼豁免：闭眼持续 < blink_exempt_sec 视为正常眨眼，不计入闭眼帧
-      （对齐文献标准：PERCLOS 统计排除正常眨眼）
+    实时调用传入单调时间戳。省略时间戳时按名义 FPS 处理已有等间隔回放。
     """
 
     def __init__(self, window_sec: int = 30, ear_threshold: float = 0.22, fps: int = 30,
-                 blink_exempt_sec: float = 0.3):
-        self.window_sec = max(1, int(window_sec))
+                 blink_exempt_sec: float = 0.3, max_gap_sec: float = 0.25):
+        self.window_sec = max(1.0, float(window_sec))
         self.ear_threshold = ear_threshold
         self.fps = max(1, int(fps))
-        self.window_frames = max(1, self.window_sec * self.fps)
-        self.blink_exempt_frames = max(0, int(blink_exempt_sec * self.fps))
+        self.blink_exempt_sec = max(0.0, blink_exempt_sec)
+        self.max_gap_sec = max_gap_sec
+        self._intervals = deque()
+        self._now = None
+        self._last_closed = None
 
-        # 保存每帧的闭眼状态 True/False
-        self._closed_states = deque(maxlen=self.window_frames)
+    def update(self, ear_value: float | None, timestamp: float | None = None) -> None:
+        closed = None if ear_value is None else ear_value < self.ear_threshold
+        if timestamp is None:
+            if closed is None:
+                return  # 旧的定帧率回放跳过无人脸帧。
+            start = 0.0 if self._now is None else self._now
+            timestamp = start + 1.0 / self.fps
+            self._add_interval(start, timestamp, closed)
+        elif self._now is not None:
+            elapsed = timestamp - self._now
+            if elapsed < 0:
+                raise ValueError("PERCLOS timestamps must be monotonic")
+            if 0 < elapsed <= self.max_gap_sec and self._last_closed is not None and closed is not None:
+                self._add_interval(self._now, timestamp, self._last_closed)
 
-        # 眨眼豁免状态：记录当前闭眼会话的起始位置，未超过豁免帧数前可回溯豁免
-        self._pending_start: int | None = None      # 闭眼开始帧在队列中的位置
-        self._pending_committed = False             # 闭眼已超过豁免帧数（转正，不再回溯）
+        self._now = timestamp
+        self._last_closed = closed
+        cutoff = timestamp - self.window_sec
+        while self._intervals and self._intervals[0][1] <= cutoff:
+            self._intervals.popleft()
 
-    def update(self, ear_value: float | None) -> None:
-        """
-        每帧调用一次。
-        ear_value 为 None 表示无人脸，跳过不计。
-        """
-        if ear_value is None:
-            return
-        closed = ear_value < self.ear_threshold
+    def _add_interval(self, start, end, closed):
+        if self._intervals:
+            prev_start, prev_end, prev_closed = self._intervals[-1]
+            if prev_end == start and prev_closed == closed:
+                self._intervals[-1] = prev_start, end, closed
+                return
+        self._intervals.append((start, end, closed))
 
-        # 先按原始状态入队（保证窗口帧数完整）
-        self._closed_states.append(closed)
-
-        if closed:
-            if self._pending_start is None:
-                # 闭眼会话开始
-                self._pending_start = len(self._closed_states) - 1
-                self._pending_committed = False
-            elif not self._pending_committed and (
-                len(self._closed_states) - self._pending_start >= self.blink_exempt_frames
-            ):
-                # 闭眼持续超过豁免帧数 → 转正（此前的帧保持 True，不再修改）
-                self._pending_committed = True
-        else:
-            # 睁眼：若闭眼会话在豁免期内结束 → 视为眨眼，回溯豁免
-            if self._pending_start is not None and not self._pending_committed:
-                start = max(0, self._pending_start)
-                # 当前睁眼帧保留 False，回溯修改闭眼会话期间的帧
-                for i in range(start, len(self._closed_states) - 1):
-                    self._closed_states[i] = False
-            self._pending_start = None
-            self._pending_committed = False
+    def get_stats(self) -> tuple[float, float]:
+        """返回 (闭眼比例, 窗内有效观测秒数)。"""
+        if self._now is None:
+            return 0.0, 0.0
+        cutoff = self._now - self.window_sec
+        valid = closed_sec = 0.0
+        for start, end, closed in self._intervals:
+            duration = end - max(start, cutoff)
+            valid += duration
+            if closed and end - start + 1e-9 >= self.blink_exempt_sec:
+                closed_sec += duration
+        return (closed_sec / valid if valid else 0.0), valid
 
     def get_perclos(self) -> float:
-        """
-        返回当前窗口内的闭眼帧比例，取值 0.0 ~ 1.0。
-        窗口未满时，按已有数据计算，不做零填充。
-        正常眨眼（< 豁免期）不计入闭眼。
-        """
-        if not self._closed_states:
-            return 0.0
-        return float(sum(self._closed_states) / len(self._closed_states))
+        return self.get_stats()[0]
 
     def reset(self) -> None:
-        """清空窗口数据"""
-        self._closed_states.clear()
-        self._pending_start = None
-        self._pending_committed = False
+        self._intervals.clear()
+        self._now = None
+        self._last_closed = None
 
 
 # ============================================================

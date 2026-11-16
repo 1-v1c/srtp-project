@@ -59,16 +59,18 @@ class FatigueScorer:
         self._prev_eye_closed_sec = 0.0         # 上一帧闭眼秒数（用于微睡眠边缘检测）
 
     # ── 每帧调用 ──
-    def update(self, dt: float, events: dict) -> None:
-        dt = max(0.001, dt)
+    def update(self, dt: float, events: dict, *, now: float | None = None,
+               observed_dt: float | None = None) -> None:
+        dt = max(0.0, dt)
+        if observed_dt is None:
+            observed_dt = dt
 
         # ── 状态源累积（本帧持续的状态贡献）──
         eye_closed_sec = float(events.get("eye_closed_sec", 0.0))
-        now = time.time()
-        yawn_freq_active = (
-            len([t for t in self._yawn_times if now - t <= YAWN_FREQ_WINDOW_SEC])
-            >= YAWN_FREQ_THRESHOLD
-        )
+        now = time.monotonic() if now is None else now
+        while self._yawn_times and now - self._yawn_times[0] > YAWN_FREQ_WINDOW_SEC:
+            self._yawn_times.popleft()
+        yawn_freq_active = events.get("face_valid", True) and len(self._yawn_times) >= YAWN_FREQ_THRESHOLD
         flags = {
             "eye_close":  0.5 <= eye_closed_sec < MICRO_SLEEP_SEC,   # 闭眼 0.5~2s 区间
             "perclos":    events.get("perclos_over", False),
@@ -80,7 +82,7 @@ class FatigueScorer:
         }
         for name, active in flags.items():
             if active:
-                self._sources[name]["score"] += self._sources[name]["rate"] * dt
+                self._sources[name]["score"] += self._sources[name]["rate"] * observed_dt
 
         # ── 全局指数衰减（本帧流逝的时间）──
         d = self._decay ** dt

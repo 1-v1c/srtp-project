@@ -26,6 +26,9 @@ MAR_THRESHOLD = 0.65          # MAR 高于此值判定为"张嘴"
 MAR_YAWN_DURATION_SEC = 2.8   # 持续张嘴超过此秒数，判定为一次哈欠
 MAR_YAWN_GRACE_SEC = 0.2      # 宽容缓冲：MAR 短暂跌回阈值此秒数内不计为中断
 
+# 超过此间隔视为观测中断，避免把遮挡或卡顿计成持续闭眼。
+MAX_OBSERVATION_GAP_SEC = 0.25
+
 # ---- PERCLOS ----
 PERCLOS_WINDOW_SEC = 30       # PERCLOS 统计窗口（秒）
                               # 越大 → 变化越平滑，但对突发事件反应慢
@@ -51,6 +54,8 @@ PITCH_DOWN_THRESHOLD = 22     # Pitch 超过此角度判定为"低头"（度）
 PITCH_OFFSET = 0              # 正常看屏幕时的基线 pitch 值，用 CalibTool HEAD 模式测量后填入
 HEAD_DOWN_DURATION_SEC = 2.0  # 持续低头超过此秒数触发警告
 YAW_DEVIATION_THRESHOLD = 30  # Yaw 偏离正前方超过此角度（度）
+
+YAW_EAR_GATE = 25             # 侧脸时暂停使用 EAR（度）
 
 # ---- 疲劳评分 ----
 # 每个条件满足时累加的分数
