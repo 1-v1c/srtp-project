@@ -18,12 +18,12 @@ def simulate_following(
     update, *, fatigue, distance=40.0, v_ego=20.0, v_target=10.0,
     target_acceleration=lambda _: 0.0,
 ):
-    """Run a 50 Hz longitudinal simulation with a bumper-to-bumper gap."""
+    """Run a 30 s, 50 Hz longitudinal simulation with a bumper-to-bumper gap."""
     box = make_box(distance=distance, v_ego=v_ego, v_target=v_target, fatigue=fatigue)
     dt = 0.02
     first_brake = None
     min_gap = distance
-    for frame in range(500):
+    for frame in range(1500):
         now = frame * dt
         box.a_target = target_acceleration(now) if box.v_target > 0.0 else 0.0
         update(box)
@@ -40,7 +40,7 @@ def simulate_following(
         if box.d <= 0.0:
             break
 
-    return first_brake, min_gap
+    return first_brake, min_gap, box.v_ego - box.v_target
 
 
 class BrakeAlgorithmTests(unittest.TestCase):
@@ -104,15 +104,51 @@ class BrakeAlgorithmTests(unittest.TestCase):
             with self.subTest(fatigue=fatigue), self.assertRaises(ValueError):
                 update_brake_result(make_box(fatigue=fatigue))
 
+    def test_low_closing_speed_brakes_on_stopping_distance(self):
+        for speed, gap, expected in (
+            (0.075, 0.8, 1.5), (0.1, 0.8, 1.5), (0.101, 0.8, 1.5),
+            (0.4, 1.15, 1.5), (0.4, 1.25, 0.0),
+        ):
+            with self.subTest(speed=speed, gap=gap):
+                box = make_box(distance=gap, v_ego=speed, v_target=0.0)
+                update_brake_result(box)
+                self.assertEqual(box.a_final, expected)
+                self.assertEqual(box.warning, expected > 0)
+                self.assertEqual(box.brake_level, int(expected > 0))
+
+    def test_low_speed_uses_net_gap_independently_of_center_distance(self):
+        box = make_box(distance=5.3, v_ego=10.075, v_target=10.0)
+        box.bumper_gap_m = 0.8
+        update_brake_result(box)
+        self.assertEqual((box.a_final, box.ttc), (1.5, 999.0))
+        box.target_valid = False
+        update_brake_result(box)
+        self.assertEqual(box.a_final, 0.0)
+
+    def test_low_speed_ignores_non_closing_or_behind_target(self):
+        for ego, lead, dx in ((0.0, 0.0, 0.5), (10.0, 10.0, 0.5),
+                              (10.0, 10.075, 0.5), (10.075, 10.0, -0.5)):
+            with self.subTest(ego=ego, lead=lead, dx=dx):
+                box = make_box(distance=abs(dx), v_ego=ego, v_target=lead)
+                box.dx = dx
+                update_brake_result(box)
+                self.assertEqual((box.warning, box.brake_level, box.a_final), (False, 0, 0.0))
+
+    def test_low_speed_retains_stronger_ttc_brake(self):
+        box = make_box(distance=0.25, v_ego=0.9, v_target=0.0)
+        update_brake_result(box)
+        self.assertEqual((box.brake_level, box.a_final), (3, 8.0))
+
     def test_closed_loop_following_fatigue_brakes_earlier(self):
         results = [
             simulate_following(update_brake_result, fatigue=level)
             for level in range(4)
         ]
-        for first_brake, min_gap in results:
+        for first_brake, min_gap, closing_at_end in results:
             self.assertIsNotNone(first_brake)
             self.assertGreater(min_gap, 0.0)
-        brake_times = [first_brake[0] for first_brake, _ in results]
+            self.assertLessEqual(closing_at_end, 1e-9)
+        brake_times = [first_brake[0] for first_brake, _, _ in results]
         self.assertEqual(brake_times, sorted(brake_times, reverse=True))
         self.assertLess(brake_times[3], brake_times[0])
 
@@ -127,11 +163,12 @@ class BrakeAlgorithmTests(unittest.TestCase):
         for name, inputs in scenarios.items():
             for fatigue in range(4):
                 with self.subTest(scenario=name, fatigue=fatigue):
-                    first_brake, min_gap = simulate_following(
+                    first_brake, min_gap, closing_at_end = simulate_following(
                         update_brake_result, fatigue=fatigue, **inputs,
                     )
                     self.assertIsNotNone(first_brake)
                     self.assertGreater(min_gap, 0.0)
+                    self.assertLessEqual(closing_at_end, 1e-9)
 
 
 if __name__ == "__main__":

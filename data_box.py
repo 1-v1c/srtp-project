@@ -7,6 +7,7 @@ class DataBox:
         self.v_target = 0.0             # 障碍物速度 (m/s)
         self.a_target = 0.0             # 障碍物加速度 (m/s²，负值为减速)
         self.d = 999.0                  # 两车直线距离 (m)
+        self.bumper_gap_m = None        # 本帧纵向保险杠净距 (m)，d 为中心距时由上游同步写入
         self.dx = 999.0                 # 纵向相对距离 (m)
         self.dy = 0.0                   # 横向相对距离 (m)
         self.heading_target = 0.0       # 障碍物航向角 (rad)
