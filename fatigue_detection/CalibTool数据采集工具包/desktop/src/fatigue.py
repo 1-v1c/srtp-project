@@ -15,7 +15,7 @@ from collections import deque
 from config import (
     EYE_CLOSED_05S_SCORE, EYE_CLOSED_2S_SCORE,
     PERCLOS_OVER_SCORE, YAWN_SCORE, YAWN_FREQ_SCORE,
-    HEAD_DOWN_SCORE, YAW_DEVIATION_SCORE,
+    HEAD_DOWN_SCORE, HEAD_DOWN_SCORE_CAP, YAW_DEVIATION_SCORE,
     BLINK_RATE_SCORE, BLINK_DUR_SCORE,
     MICRO_SLEEP_SEC, FATIGUE_DECAY_HALF_LIFE,
     YAWN_FREQ_WINDOW_SEC, YAWN_FREQ_THRESHOLD,
@@ -88,6 +88,8 @@ class FatigueScorer:
         d = self._decay ** dt
         for s in self._sources.values():
             s["score"] *= d
+        head_down = self._sources["head_down"]
+        head_down["score"] = min(head_down["score"], HEAD_DOWN_SCORE_CAP)
 
         # ── 事件加分（本帧事件，不受本帧衰减影响，下一帧起开始衰减）──
         if events.get("yawn_just_completed"):
@@ -121,6 +123,10 @@ class FatigueScorer:
     def get_active_sources(self, min_score: float = 0.05) -> list:
         """返回分数贡献 > min_score 的源 [(名称, 贡献值)]，用于可解释性显示"""
         return [(n, s["score"]) for n, s in self._sources.items() if s["score"] > min_score]
+
+    def clear_head_down(self) -> None:
+        """Drop the old posture contribution when the pitch baseline changes."""
+        self._sources["head_down"]["score"] = 0.0
 
     def reset(self) -> None:
         """清空全部状态（换人 / 重新开始）"""

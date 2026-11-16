@@ -43,6 +43,10 @@
         <span id="eyes-status" class="status-item">眼部 <strong>—</strong></span>
         <span id="fps" class="fps">— FPS</span>
       </div>
+      <div class="calibration">
+        <span id="pitch-calibration" role="status">Pitch 等待归零</span>
+        <button id="calibrate" class="button" type="button" disabled>重新归零</button>
+      </div>
     </section>
 
     <section class="panel monitoring" aria-labelledby="fatigue-title">
@@ -78,9 +82,10 @@
     <section class="panel details" aria-labelledby="detail-title">
       <div class="panel-head"><div><h2 id="detail-title">观测明细</h2><p>头部姿态与眨眼</p></div></div>
       <dl class="detail-values">
-        <div><dt>俯仰 Pitch</dt><dd id="pitch">—</dd></div>
+        <div><dt>原始 Pitch</dt><dd id="pitch">—</dd></div>
         <div><dt>偏航 Yaw</dt><dd id="yaw">—</dd></div>
         <div><dt>横滚 Roll</dt><dd id="roll">—</dd></div>
+        <div><dt>相对 Pitch</dt><dd id="pitch-relative">—</dd></div>
         <div><dt>眨眼频率</dt><dd id="blink-rate">—</dd></div>
         <div><dt>平均眨眼时长</dt><dd id="blink-ms">—</dd></div>
       </dl>

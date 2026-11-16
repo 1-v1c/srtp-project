@@ -70,7 +70,8 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.request("POST", path, '{"action":"reset"}', rejected)[0], 403)
         self.assertEqual(self.request("POST", path, '{"action":"mesh","enabled":"off"}', headers)[0], 400)
         self.assertEqual(self.request("POST", path, '{"action":"mesh","enabled":false}', headers)[0], 202)
-        self.assertEqual(list(self.dashboard.pending_actions()), [("mesh", False)])
+        self.assertEqual(self.request("POST", path, '{"action":"calibrate"}', headers)[0], 202)
+        self.assertEqual(list(self.dashboard.pending_actions()), [("mesh", False), ("calibrate", None)])
         self.assertEqual(self.request("POST", path, '{"action":"stop"}', headers)[0], 202)
         self.assertTrue(self.dashboard.stop.is_set())
 

@@ -51,7 +51,10 @@ BLINK_DUR_SCORE = 2           # 眨眼时长 / 慢眨眼异常（每 60s 加 2 �
 
 # ---- 头部姿态 ----
 PITCH_DOWN_THRESHOLD = 22     # Pitch 超过此角度判定为"低头"（度）
-PITCH_OFFSET = 0              # 正常看屏幕时的基线 pitch 值，用 CalibTool HEAD 模式测量后填入
+PITCH_BASELINE_DURATION_SEC = 3.0
+PITCH_BASELINE_MAX_SPREAD_DEG = 6.0
+PITCH_BASELINE_MAX_YAW_DEG = 15.0
+PITCH_MAX_ROLL_DEG = 20.0
 HEAD_DOWN_DURATION_SEC = 2.0  # 持续低头超过此秒数触发警告
 YAW_DEVIATION_THRESHOLD = 30  # Yaw 偏离正前方超过此角度（度）
 
@@ -65,6 +68,7 @@ PERCLOS_OVER_SCORE = 3        # PERCLOS 超过阈值（每 30s 加 3 分）
 YAWN_SCORE = 2                # 检测到一次哈欠（事件 +2）
 YAWN_FREQ_SCORE = 3           # 1 分钟内哈欠超过 2 次（每 60s 加 3 分）
 HEAD_DOWN_SCORE = 2           # 持续低头（每 2s 加 2 分）
+HEAD_DOWN_SCORE_CAP = 3.0     # 低头一项至多贡献 3 分，单独最多达到 L1
 YAW_DEVIATION_SCORE = 1       # 长时间不看前方（每 5s 加 1 分）
 
 # 评分器运行参数

@@ -170,7 +170,7 @@ def create_server(dashboard, port):
                     raise ValueError
                 body = json.loads(self.rfile.read(size))
                 action, value = body["action"], body.get("enabled")
-                if action not in ("reset", "mesh", "distraction", "pause", "resume", "stop"):
+                if action not in ("reset", "calibrate", "mesh", "distraction", "pause", "resume", "stop"):
                     raise ValueError
                 if action in ("mesh", "distraction") and not isinstance(value, bool):
                     raise ValueError

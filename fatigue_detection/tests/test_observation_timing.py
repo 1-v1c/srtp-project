@@ -54,7 +54,9 @@ def replay(frames):
                 main, Camera=lambda: camera, FaceMeshDetector=lambda: detector,
                 FatigueScorer=RecordingScorer, time=clock, LOG_DIR=directory,
                 calculate_ear=lambda *_: sample[3], calculate_mar=lambda *_: 0.1,
-                calculate_head_pose=lambda *_, **__: None if sample[2] is None else (-4.0, sample[2], 0.0),
+                calculate_head_pose=lambda *_, **__: None if sample[2] is None else (
+                    sample[4] if len(sample) > 4 else -4.0, sample[2], 0.0
+                ),
                 _HAS_SOUND=False, SHOW_FACE_MESH=False, SHOW_HEAD_POSE_AXIS=False,
                 SHOW_EYE_POINTS=False, SHOW_MOUTH_POINTS=False,
             ),
@@ -100,6 +102,23 @@ class ObservationTimingTests(unittest.TestCase):
     def test_sustained_frontal_closure_still_reaches_level_three(self):
         _, observed = replay([(i / 30, 478, 0, 0.12) for i in range(91)])
         self.assertEqual(observed[60][1:3], (2.0, 3))
+
+    def test_positive_neutral_pitch_reaches_zero_without_fatigue_score(self):
+        rows, _ = replay([(i / 30, 478, 0, 0.34, 9.0) for i in range(391)])
+        self.assertEqual(rows[0]["pitch_baseline"], "")
+        self.assertEqual(rows[-1]["pitch_baseline"], "9.0")
+        self.assertEqual(rows[-1]["pitch_relative"], "0.0")
+        self.assertTrue(all(row["src_head_down"] == "0.00" for row in rows))
+
+    def test_sustained_drop_relative_to_neutral_stays_at_level_one(self):
+        baseline = 9.0
+        down_pitch = baseline + main.PITCH_DOWN_THRESHOLD + 4.0
+        frames = [(i / 30, 478, 0, 0.34, baseline if i < 120 else down_pitch) for i in range(661)]
+        rows, observed = replay(frames)
+        self.assertEqual(rows[-1]["pitch_baseline"], "9.0")
+        self.assertEqual(float(rows[-1]["pitch_relative"]), down_pitch - baseline)
+        self.assertEqual(rows[-1]["src_head_down"], "3.00")
+        self.assertEqual(max(level for _, _, level, _ in observed), 1)
 
     def test_pose_solver_failure_can_be_reported_as_invalid(self):
         with patch("features.cv2.solvePnP", return_value=(False, None, None)):

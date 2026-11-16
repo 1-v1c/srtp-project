@@ -116,7 +116,7 @@ function render(state) {
   snapshot.tabIndex = live ? 0 : -1;
   if (live) snapshot.href = "/api/frame.jpg";
   else snapshot.removeAttribute("href");
-  for (const control of ["mesh", "reset"]) {
+  for (const control of ["mesh", "reset", "calibrate"]) {
     $(control).disabled = !live || activeActions.has(control);
   }
   $("pause").disabled = (!live && !paused) || activeActions.has("pause");
@@ -153,6 +153,11 @@ function render(state) {
   write("closure", number(state.eye_closed_sec, 2, " s"));
   write("closure-detail", live && state.eye_valid ? (state.eye_closed_sec > 0 ? "正在累计闭眼" : "当前睁眼") : "等待有效眼部观测");
   for (const key of ["pitch", "yaw", "roll"]) write(key, number(state[key], 1, "°"));
+  const baselineReady = live && Number.isFinite(state.pitch_baseline);
+  $("pitch-calibration").dataset.ready = String(baselineReady);
+  write("pitch-calibration", baselineReady ? `Pitch 已归零 · 基线 ${number(state.pitch_baseline, 1, "°")}`
+    : live ? "Pitch 标定中 · 请保持自然坐姿看向前方" : "Pitch 等待观测");
+  write("pitch-relative", number(state.pitch_relative, 1, "°"));
   write("blink-rate", number(state.blink_rate, 0, " 次/分"));
   write("blink-ms", number(state.blink_ms, 0, " ms"));
   renderDistraction(live ? state.distraction : null);
@@ -250,6 +255,7 @@ for (const action of ["mesh", "distraction"]) {
   $(action).addEventListener("change", (event) => requestAction(action, event.target.checked));
 }
 $("reset").addEventListener("click", () => requestAction("reset"));
+$("calibrate").addEventListener("click", () => requestAction("calibrate"));
 $("pause").addEventListener("click", () => requestAction(lastState?.status === "paused" ? "resume" : "pause"));
 new ResizeObserver(drawChart).observe($("chart"));
 

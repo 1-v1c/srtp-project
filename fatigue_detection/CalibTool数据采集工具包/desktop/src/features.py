@@ -306,6 +306,43 @@ class HeadPoseSmoother:
         )
 
 
+class PitchBaseline:
+    """Acquire a neutral pitch from one continuous, stable observation period."""
+
+    def __init__(self, duration_sec: float, max_spread_deg: float, max_gap_sec: float):
+        self.duration_sec = duration_sec
+        self.max_spread_deg = max_spread_deg
+        self.max_gap_sec = max_gap_sec
+        self.reset()
+
+    def reset(self) -> None:
+        self.value = None
+        self.interrupt()
+
+    def interrupt(self) -> None:
+        self._pitches = []
+        self._start = None
+        self._last = None
+
+    def update(self, pitch: float | None, now: float) -> None:
+        if self.value is not None:
+            return
+        if pitch is None or not np.isfinite(pitch):
+            self.interrupt()
+            return
+        if self._pitches:
+            spread = max(max(self._pitches), pitch) - min(min(self._pitches), pitch)
+            if now - self._last > self.max_gap_sec or spread > self.max_spread_deg:
+                self.interrupt()
+        if self._start is None:
+            self._start = now
+        self._pitches.append(pitch)
+        self._last = now
+        if now - self._start >= self.duration_sec:
+            self.value = float(np.median(self._pitches))
+            self.interrupt()
+
+
 class PERCLOSCounter:
     """按墙钟窗内的有效观测时长统计闭眼比例，连续闭眼达豁免时长后才计入。
 

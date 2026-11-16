@@ -24,14 +24,16 @@ from features import (
     calculate_ear, calculate_mar,
     calculate_head_pose, draw_head_axes,
     LEFT_EYE_INDICES, RIGHT_EYE_INDICES,
-    EARSmoother, MARSmoother, HeadPoseSmoother, PERCLOSCounter, BlinkAnalyzer,
+    EARSmoother, MARSmoother, HeadPoseSmoother, PitchBaseline, PERCLOSCounter, BlinkAnalyzer,
 )
 from fatigue import FatigueScorer
 from config import (
     EAR_THRESHOLD, EAR_CONSECUTIVE_FRAMES, FPS_TARGET, MAX_OBSERVATION_GAP_SEC,
     MAR_THRESHOLD, MAR_YAWN_DURATION_SEC, MAR_YAWN_GRACE_SEC,
     PITCH_DOWN_THRESHOLD, HEAD_DOWN_DURATION_SEC, YAW_DEVIATION_THRESHOLD,
-    YAW_DEVIATION_DURATION_SEC, PITCH_OFFSET, YAW_EAR_GATE,
+    YAW_DEVIATION_DURATION_SEC, YAW_EAR_GATE,
+    PITCH_BASELINE_DURATION_SEC, PITCH_BASELINE_MAX_SPREAD_DEG,
+    PITCH_BASELINE_MAX_YAW_DEG, PITCH_MAX_ROLL_DEG,
     SHOW_FACE_MESH, SHOW_EYE_POINTS, SHOW_MOUTH_POINTS, SHOW_HEAD_POSE_AXIS,
     PERCLOS_WINDOW_SEC, PERCLOS_THRESHOLD, BLINK_EXEMPT_SEC,
     SLOW_BLINK_SEC, BLINK_WINDOW_SEC,
@@ -86,6 +88,8 @@ def run_session(cam, detector, resources, dashboard):
     ear_smoother = EARSmoother(window_size=5)
     mar_smoother = MARSmoother(window_size=5)
     head_pose_smoother = HeadPoseSmoother(window_size=5)
+    pitch_baseline = PitchBaseline(PITCH_BASELINE_DURATION_SEC, PITCH_BASELINE_MAX_SPREAD_DEG,
+                                   MAX_OBSERVATION_GAP_SEC)
     perclos_counter = PERCLOSCounter(
         window_sec=PERCLOS_WINDOW_SEC,
         ear_threshold=EAR_THRESHOLD,
@@ -118,6 +122,7 @@ def run_session(cam, detector, resources, dashboard):
         "src_yawn", "src_yawn_freq", "src_head_down", "src_yaw_dev",
         "src_blink_rate", "src_blink_dur",
         "face_valid", "pose_valid", "eye_valid", "perclos_valid_sec",
+        "pitch_baseline", "pitch_relative",
     ])
     print(f"[LOG] 运行日志: {log_path}")
 
@@ -160,6 +165,10 @@ def run_session(cam, detector, resources, dashboard):
                 if action == "reset":
                     scorer.reset()
                     score_revision += 1
+                elif action == "calibrate":
+                    pitch_baseline.reset()
+                    head_down_start = None
+                    scorer.clear_head_down()
                 elif action == "mesh":
                     show_face_mesh = enabled
                 elif action == "distraction" and distraction is not None:
@@ -176,6 +185,7 @@ def run_session(cam, detector, resources, dashboard):
         previous_frame_time = now
         frame_gap = resumed or dt > MAX_OBSERVATION_GAP_SEC
         if frame_gap:
+            pitch_baseline.interrupt()
             eye_closed_start = head_down_start = yaw_dev_start = None
             yawn_start_time = yawn_gap_start = None
             yawn_in_progress = False
@@ -270,9 +280,14 @@ def run_session(cam, detector, resources, dashboard):
                     in_gap = True
 
         # ── 状态计时（低头 / 偏头）────────────
-        effective_pitch = pitch - PITCH_OFFSET   # 扣掉坐姿基线的有效低头角
+        pitch_usable = eye_valid and abs(pose[2]) <= PITCH_MAX_ROLL_DEG
+        baseline_sample = pose[0] if pitch_usable and abs(pose[1]) <= PITCH_BASELINE_MAX_YAW_DEG else None
+        pitch_baseline.update(baseline_sample, now)
+        neutral_pitch = pitch_baseline.value
+        effective_pitch = pitch - neutral_pitch if pitch_usable and neutral_pitch is not None else None
+        pitch_down = effective_pitch is not None and effective_pitch > PITCH_DOWN_THRESHOLD
 
-        if pose_valid and effective_pitch > PITCH_DOWN_THRESHOLD:
+        if pitch_down:
             head_down_start = head_down_start if head_down_start is not None else now
         else:
             head_down_start = None
@@ -344,6 +359,8 @@ def run_session(cam, detector, resources, dashboard):
                 f"{src['yawn']:.2f}", f"{src['yawn_freq']:.2f}", f"{src['head_down']:.2f}", f"{src['yaw_dev']:.2f}",
                 f"{src['blink_rate']:.2f}", f"{src['blink_dur']:.2f}",
                 int(face_found), int(pose_valid), int(eye_valid), f"{perclos_valid_sec:.3f}",
+                f"{neutral_pitch:.1f}" if neutral_pitch is not None else "",
+                f"{effective_pitch:.1f}" if effective_pitch is not None else "",
             ])
             log_file.flush()
 
@@ -370,6 +387,8 @@ def run_session(cam, detector, resources, dashboard):
                 "perclos_window": PERCLOS_WINDOW_SEC,
                 "eye_closed_sec": float(eye_closed_sec) if eye_valid else None,
                 "pitch": float(pitch) if pose_valid else None,
+                "pitch_baseline": neutral_pitch,
+                "pitch_relative": effective_pitch,
                 "yaw": float(yaw) if pose_valid else None,
                 "roll": float(roll) if pose_valid else None,
                 "blink_rate": float(blink_stats["blink_rate"]) if eye_valid else None,
@@ -481,15 +500,16 @@ def run_session(cam, detector, resources, dashboard):
             y_offset += 6
 
             # 角度数值
-            pitch_color = (0, 0, 255) if effective_pitch > PITCH_DOWN_THRESHOLD else (0, 255, 255) if abs(effective_pitch) < 10 else (0, 165, 255)
+            pitch_color = (0, 0, 255) if pitch_down else (0, 255, 255)
             yaw_color   = (0, 0, 255) if abs(yaw) > YAW_DEVIATION_THRESHOLD else (0, 255, 255)
 
-            cv2.putText(frame, f"Pitch: {pitch:.1f} ({effective_pitch:+.1f})  Yaw: {yaw:.1f}  Roll: {roll:.1f}",
+            pitch_relative_text = f"{effective_pitch:+.1f}" if effective_pitch is not None else "--"
+            cv2.putText(frame, f"Pitch: {pitch:.1f} ({pitch_relative_text})  Yaw: {yaw:.1f}  Roll: {roll:.1f}",
                         (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, pitch_color, 2)
             y_offset += 22
 
             # 低头警告（只限 effective_pitch 正值过大，仰头不警告）
-            if effective_pitch > PITCH_DOWN_THRESHOLD:
+            if pitch_down:
                 cv2.putText(frame, "HEAD DOWN!", (10, y_offset),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 y_offset += 22
@@ -548,6 +568,11 @@ def run_session(cam, detector, resources, dashboard):
         elif key == ord('r'):
             scorer.reset()
             print("[RESET] 疲劳评分已重置")
+        elif key == ord('c'):
+            pitch_baseline.reset()
+            head_down_start = None
+            scorer.clear_head_down()
+            print("[CALIBRATION] 请自然坐姿看向前方，重新采集 Pitch 基线。")
 
     if dashboard is not None:
         if dashboard.stop.is_set():
