@@ -7,7 +7,7 @@ SRTP 项目「人车协同安全系统」的 DMS 端：基于 MediaPipe 的**驾
 
 - **EAR** 眼部长宽比（阈值 0.22，5 帧平滑，持续闭眼检测）
 - **MAR** 嘴部长宽比（阈值 0.65，2.8s 哈欠判定 + 0.2s 宽容缓冲）
-- **HeadPose** 头部姿态（solvePnP 六点法，Pitch/Yaw/Roll，正视自动归零后输出相对 Pitch）
+- **HeadPose** 头部姿态（使用上半脸参考点求解 Pitch/Yaw/Roll，正视自动归零后输出相对 Pitch）
 - **PERCLOS** 闭眼比例统计（30s 窗口，眨眼 <0.3s 豁免不计入）
 - **眨眼动力学**（疲劳早期信号）：频率 / 平均时长 / 慢眨眼 / 闭合速度
 - **疲劳评分器**（fatigue.py）：9 个分数源融合 → 连续评分 → L0~L3 状态机（45s 半衰期衰减，分数来源可解释）
@@ -93,6 +93,8 @@ python calibtool.py
 | PERCLOS_THRESHOLD | 0.20 | 30s 窗口闭眼比例报警 |
 | 疲劳分级 | <2 / <5 / <9 / ≥9 | L0 正常 / L1 轻度 / L2 中度 / L3 重度 |
 | 眨眼疲劳源 | ≥25 次/分 或 平均时长 ≥0.4s 或 慢眨眼 ≥2 次/分 | 疲劳早期信号 |
+
+头姿参考坐标取自 [MediaPipe 标准人脸模型](https://github.com/google-ai-edge/mediapipe/blob/a908d668c730da128dfa8d9f6bd25d519d006692/mediapipe/modules/face_geometry/data/canonical_face_model.obj) 的上半脸顶点，转换为 OpenCV 坐标系。[Apache-2.0 许可](licenses/MediaPipe-Apache-2.0.txt)
 
 ## 与 AEB 端对接
 

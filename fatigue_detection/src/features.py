@@ -155,18 +155,26 @@ class MARSmoother:
 # Head Pose — 3D 头部姿态估计 (solvePnP)
 # ============================================================
 
-# 6 个参考点的 3D 坐标（通用人脸模型，单位 mm）
-# 原始 MediaPipe 模型是 Y 轴朝上；OpenCV solvePnP 使用 Y 轴朝下，故 Y 值取反
+# MediaPipe canonical face model 的上半脸参考点（Apache-2.0）。
+# 来源：https://github.com/google-ai-edge/mediapipe/blob/a908d668c730da128dfa8d9f6bd25d519d006692/mediapipe/modules/face_geometry/data/canonical_face_model.obj
+# 以鼻尖为原点，厘米转毫米，转换到 OpenCV 的 X 右、Y 下、Z 向前坐标。
+# 嘴唇、嘴角和下巴随张嘴移动，排除在头姿拟合之外。
 _FACE_MODEL_3D = np.array([
-    (0.0, 0.0, 0.0),             #   1: 鼻尖
-    (0.0, 330.0, -65.0),         # 152: 下巴（在鼻尖下方 → Y 正）
-    (-225.0, -170.0, -135.0),    #  33: 左眼左眼角（在鼻尖上方 → Y 负）
-    (225.0, -170.0, -135.0),     # 263: 右眼右眼角
-    (-150.0, 150.0, -125.0),     #  61: 左嘴角（在鼻尖下方 → Y 正）
-    (150.0, 150.0, -125.0),      # 291: 右嘴角
+    (0.0, 0.0, 0.0),                  # 1
+    (0.0, -36.0012, 16.8698),         # 6
+    (0.0, -93.8864, 29.9407),         # 10
+    (-44.4586, -37.9086, 43.0218),    # 33
+    (-18.5643, -37.1211, 37.1770),    # 133
+    (0.0, -43.9789, 22.3959),         # 168
+    (44.4586, -37.9086, 43.0218),     # 263
+    (18.5643, -37.1211, 37.1770),     # 362
+    (-77.4309, -34.9186, 94.8077),    # 127
+    (77.4309, -34.9186, 94.8077),     # 356
 ], dtype=np.float64)
 
-_FACE_LANDMARK_IDS = [1, 152, 33, 263, 61, 291]
+_FACE_LANDMARK_IDS = [1, 6, 10, 33, 133, 168, 263, 362, 127, 356]
+_OUTER_EYE_POSITIONS = (_FACE_LANDMARK_IDS.index(33), _FACE_LANDMARK_IDS.index(263))
+_MAX_REPROJECTION_ERROR_EYE_RATIO = 0.12
 
 
 def _solve_head_pnp(landmarks, img_w, img_h):
@@ -182,6 +190,11 @@ def _solve_head_pnp(landmarks, img_w, img_h):
             return None
         x, y = landmarks[idx]
         img_points.append([x * img_w, y * img_h])
+    img_points = np.array(img_points, dtype=np.float64)
+    left, right = _OUTER_EYE_POSITIONS
+    eye_span = np.linalg.norm(img_points[left] - img_points[right])
+    if not np.isfinite(img_points).all() or eye_span < 1.0:
+        return None
 
     # 近似相机内参（无需精确标定）
     focal_length = max(img_w, img_h)
@@ -196,12 +209,21 @@ def _solve_head_pnp(landmarks, img_w, img_h):
     try:
         success, rvec, tvec = cv2.solvePnP(
             _FACE_MODEL_3D,
-            np.array(img_points, dtype=np.float64),
+            img_points,
             camera_matrix,
             dist_coeffs,
-            flags=cv2.SOLVEPNP_ITERATIVE,
+            flags=getattr(cv2, "SOLVEPNP_SQPNP", cv2.SOLVEPNP_ITERATIVE),
         )
         if not success or not np.isfinite(rvec).all() or not np.isfinite(tvec).all():
+            return None
+        rotation_matrix, _ = cv2.Rodrigues(rvec)
+        depths = _FACE_MODEL_3D @ rotation_matrix[2, :] + tvec[2, 0]
+        if np.any(depths <= 0):
+            return None
+        estimates, _ = cv2.projectPoints(_FACE_MODEL_3D, rvec, tvec, camera_matrix, dist_coeffs)
+        residuals = estimates.reshape(-1, 2) - img_points
+        rms_error = np.sqrt(np.mean(np.sum(residuals ** 2, axis=1)))
+        if not np.isfinite(rms_error) or rms_error > _MAX_REPROJECTION_ERROR_EYE_RATIO * eye_span:
             return None
         return rvec, tvec, camera_matrix
     except cv2.error:
@@ -233,7 +255,7 @@ def calculate_head_pose(landmarks, img_w, img_h, *, invalid_as_none=False):
 
     # 从旋转矩阵分解欧拉角（XYZ 约定）
     # 正 pitch = 低头，正 yaw = 左转，正 roll = 左歪
-    pitch = -np.arctan2(rotation_matrix[2][1], rotation_matrix[2][2])
+    pitch = np.arctan2(rotation_matrix[2][1], rotation_matrix[2][2])
     yaw   = np.arcsin(np.clip(-rotation_matrix[2][0], -1.0, 1.0))
     roll  = np.arctan2(rotation_matrix[1][0], rotation_matrix[0][0])
 
@@ -263,12 +285,12 @@ def draw_head_axes(image, landmarks, img_w, img_h):
     rvec, tvec, camera_matrix = result
     dist_coeffs = np.zeros((4, 1), dtype=np.float64)
 
-    # 3D 坐标轴端点（从鼻尖出发，80mm 长）
+    # 3D 坐标轴端点（从鼻尖出发，35mm 长）
     axis_3d = np.float32([
         [0, 0, 0],
-        [80, 0, 0],     # X
-        [0, -80, 0],    # Y（模型 Y 朝下，取反使绿色指向上方）
-        [0, 0, -80],    # Z（模型 Z 朝前，取反使蓝色指向画外）
+        [35, 0, 0],     # X
+        [0, -35, 0],    # 竖直轴显示为向上
+        [0, 0, -35],    # 朝向相机
     ])
 
     # 投影到 2D

@@ -132,12 +132,13 @@ function render(state) {
   write("fps", number(state.fps, 1, " FPS"));
   indicator("face-status", live ? state.face_valid : null, live ? (state.face_valid ? "已定位" : "未检测") : "—");
   indicator("pose-status", live ? state.pose_valid : null, live ? (state.pose_valid ? "有效" : "不可用") : "—");
-  indicator("eyes-status", live ? state.eye_valid : null, live ? (state.eye_valid ? "有效" : "不可用") : "—");
+  const eyeReason = !state.face_valid ? "未定位人脸" : !state.pose_valid ? "头姿估计不可用" : "侧脸保护";
+  indicator("eyes-status", live ? state.eye_valid : null, live ? (state.eye_valid ? "有效" : eyeReason) : "—");
 
   $("risk").dataset.level = live ? state.level : "idle";
   write("grade", live ? `L${state.level}` : "—");
   write("risk-title", live ? fatigueLabels[state.level] : (paused ? "监测已暂停" : "等待观测"));
-  write("risk-note", live ? (state.eye_valid ? "眼部信号有效" : "当前眼部信号不可用") : "当前没有实时数据");
+  write("risk-note", live ? (state.eye_valid ? "眼部信号有效" : eyeReason) : "当前没有实时数据");
   write("score", number(state.score, 2));
   for (const [index, mark] of [...$("levels").children].entries()) {
     mark.classList.toggle("active", live && state.level === index);
