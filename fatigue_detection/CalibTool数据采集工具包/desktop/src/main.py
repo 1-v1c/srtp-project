@@ -26,10 +26,10 @@ from features import (
 )
 from fatigue import FatigueScorer
 from config import (
-    EAR_THRESHOLD, EAR_CONSECUTIVE_FRAMES,
+    EAR_THRESHOLD, EAR_CONSECUTIVE_FRAMES, FPS_TARGET, MAX_OBSERVATION_GAP_SEC,
     MAR_THRESHOLD, MAR_YAWN_DURATION_SEC, MAR_YAWN_GRACE_SEC,
     PITCH_DOWN_THRESHOLD, HEAD_DOWN_DURATION_SEC, YAW_DEVIATION_THRESHOLD,
-    YAW_DEVIATION_DURATION_SEC, PITCH_OFFSET,
+    YAW_DEVIATION_DURATION_SEC, PITCH_OFFSET, YAW_EAR_GATE,
     SHOW_FACE_MESH, SHOW_EYE_POINTS, SHOW_MOUTH_POINTS, SHOW_HEAD_POSE_AXIS,
     PERCLOS_WINDOW_SEC, PERCLOS_THRESHOLD, BLINK_EXEMPT_SEC,
     SLOW_BLINK_SEC, BLINK_WINDOW_SEC,
@@ -73,7 +73,7 @@ def main():
     perclos_counter = PERCLOSCounter(
         window_sec=PERCLOS_WINDOW_SEC,
         ear_threshold=EAR_THRESHOLD,
-        fps=30,
+        max_gap_sec=MAX_OBSERVATION_GAP_SEC,
         blink_exempt_sec=BLINK_EXEMPT_SEC,   # 眨眼豁免（<0.3s 不计入闭眼）
     )
 
@@ -100,6 +100,7 @@ def main():
         "src_eye_close", "src_micro_sleep", "src_perclos",
         "src_yawn", "src_yawn_freq", "src_head_down", "src_yaw_dev",
         "src_blink_rate", "src_blink_dur",
+        "face_valid", "pose_valid", "eye_valid", "perclos_valid_sec",
     ])
     print(f"[LOG] 运行日志: {log_path}")
 
@@ -110,7 +111,7 @@ def main():
     yawn_gap_start = None        # 宽容缓冲：MAR 跌回阈值以下的时间点
 
     # EAR 持续闭眼计数器
-    eye_closed_counter = 0
+    eye_closed_start = None
 
     # 状态计时（持续低/偏头）
     head_down_start = None       # 开始低头的时间戳
@@ -119,8 +120,9 @@ def main():
     # 报警状态
     last_alert_level = 0         # 上一次报警等级（用于蜂鸣触发）
     last_alert_time = 0.0        # 上一次报警时间（冷却）
-    last_log_time = 0.0          # 上一次日志写入时间
-    _t0 = time.time()            # 程序启动时间（日志时间基准）
+    last_log_time = float("-inf")          # 上一次日志写入时间
+    previous_frame_time = None
+    _t0 = time.monotonic()            # 程序启动时间（日志时间基准）
 
     print("[OK] 疲劳评分器就绪。按 r 重置评分，q 退出\n")
 
@@ -132,8 +134,18 @@ def main():
 
         frame = cv2.flip(frame, 1)
         h, w = frame.shape[:2]
-        fps = cam.fps if cam.fps > 0 else 30
-        dt = 1.0 / fps          # 帧间隔（秒），用于评分器累积
+        now = time.monotonic()
+        dt = 0.0 if previous_frame_time is None else now - previous_frame_time
+        previous_frame_time = now
+        frame_gap = dt > MAX_OBSERVATION_GAP_SEC
+        if frame_gap:
+            eye_closed_start = head_down_start = yaw_dev_start = None
+            yawn_start_time = yawn_gap_start = None
+            yawn_in_progress = False
+            ear_smoother.reset()
+            mar_smoother.reset()
+            head_pose_smoother.reset()
+            blink_analyzer.update(None, now)
 
         # 检测
         results = detector.detect(frame)
@@ -143,44 +155,48 @@ def main():
             detector.draw_mesh(frame, results)
 
         # ── 特征提取 ──────────────────────────
-        ear_left = ear_right = ear_avg = 0.0
-        mar_val = 0.0
+        ear_left = ear_right = ear_avg = mar_val = 0.0
         pitch = yaw = roll = 0.0
-        face_found = detector.has_face(results)
-        landmarks = []
+        landmarks = detector.get_landmarks(results) if detector.has_face(results) else []
+        face_found = len(landmarks) >= 478
+        pose = calculate_head_pose(landmarks, w, h, invalid_as_none=True) if face_found else None
+        pose_valid = pose is not None
+        eye_valid = False
+
+        if pose_valid:
+            pitch, yaw, roll = head_pose_smoother.update(*pose)
+            eye_valid = abs(pose[1]) <= YAW_EAR_GATE and abs(yaw) <= YAW_EAR_GATE
+        else:
+            head_pose_smoother.reset()
 
         if face_found:
-            landmarks = detector.get_landmarks(results)
-
-            if len(landmarks) >= 478:
-                # --- EAR（原始值用于眨眼检测，平滑值用于状态判定）---
-                ear_left_raw = calculate_ear(landmarks, LEFT_EYE_INDICES)
-                ear_right_raw = calculate_ear(landmarks, RIGHT_EYE_INDICES)
-                ear_left, ear_right, ear_avg = ear_smoother.update(ear_left_raw, ear_right_raw)
-                blink_analyzer.update((ear_left_raw + ear_right_raw) / 2, time.time())
-                perclos_counter.update(ear_avg if face_found else None)
-                perclos_value = perclos_counter.get_perclos()
-
-                # --- 持续闭眼计数 ---
-                if ear_avg < EAR_THRESHOLD:
-                    eye_closed_counter += 1
-                else:
-                    eye_closed_counter = 0
-
-                # --- MAR ---
-                mar_val = calculate_mar(landmarks)
-                mar_val = mar_smoother.update(mar_val)
-
-                # --- HeadPose ---
-                pitch, yaw, roll = calculate_head_pose(landmarks, w, h)
-                pitch, yaw, roll = head_pose_smoother.update(pitch, yaw, roll)
-
+            mar_val = mar_smoother.update(calculate_mar(landmarks))
         else:
-            # 无人脸：重置眨眼闭合状态，避免被误判为持续闭眼
-            blink_analyzer.update(None, time.time())
+            mar_smoother.reset()
+
+        if eye_valid:
+            ear_left_raw = calculate_ear(landmarks, LEFT_EYE_INDICES)
+            ear_right_raw = calculate_ear(landmarks, RIGHT_EYE_INDICES)
+            ear_left, ear_right, ear_avg = ear_smoother.update(ear_left_raw, ear_right_raw)
+            blink_analyzer.update((ear_left_raw + ear_right_raw) / 2, now)
+        else:
+            ear_smoother.reset()
+            blink_analyzer.update(None, now)
+
+        perclos_counter.update(ear_avg if eye_valid else None, now)
+        perclos_value, perclos_valid_sec = perclos_counter.get_stats()
+        if eye_valid and ear_avg < EAR_THRESHOLD:
+            if eye_closed_start is None:
+                eye_closed_start = now
+        else:
+            eye_closed_start = None
+        eye_closed_sec = now - eye_closed_start if eye_closed_start is not None else 0.0
 
         # ── 哈欠检测状态机 ────────────────────
-        mar_over_threshold = mar_val > MAR_THRESHOLD
+        mar_over_threshold = face_found and mar_val > MAR_THRESHOLD
+        if not face_found:
+            yawn_start_time = yawn_gap_start = None
+            yawn_in_progress = False
 
         yawn_elapsed = 0.0
         in_gap = False           # 是否处于宽容缓冲中
@@ -190,8 +206,8 @@ def main():
             # 回到阈值以上 → 清除缓冲标记
             yawn_gap_start = None
             if yawn_start_time is None:
-                yawn_start_time = time.time()
-            yawn_elapsed = time.time() - yawn_start_time
+                yawn_start_time = now
+            yawn_elapsed = now - yawn_start_time
 
             if yawn_elapsed >= MAR_YAWN_DURATION_SEC and not yawn_in_progress:
                 yawn_count += 1
@@ -202,9 +218,9 @@ def main():
             # MAR 低于阈值 → 启动宽容缓冲，不立刻重置
             if yawn_start_time is not None:
                 if yawn_gap_start is None:
-                    yawn_gap_start = time.time()  # 开始计时间隙
+                    yawn_gap_start = now  # 开始计时间隙
 
-                gap_duration = time.time() - yawn_gap_start
+                gap_duration = now - yawn_gap_start
                 if gap_duration > MAR_YAWN_GRACE_SEC:
                     # 缓冲超时 → 确认中断，重置
                     yawn_start_time = None
@@ -213,38 +229,37 @@ def main():
                     yawn_in_progress = False
                 else:
                     # 还在缓冲期内 → 计时继续累积，假装没中断
-                    yawn_elapsed = time.time() - yawn_start_time
+                    yawn_elapsed = now - yawn_start_time
                     in_gap = True
 
         # ── 状态计时（低头 / 偏头）────────────
         effective_pitch = pitch - PITCH_OFFSET   # 扣掉坐姿基线的有效低头角
 
-        if face_found and effective_pitch > PITCH_DOWN_THRESHOLD:
-            head_down_start = head_down_start if head_down_start is not None else time.time()
+        if pose_valid and effective_pitch > PITCH_DOWN_THRESHOLD:
+            head_down_start = head_down_start if head_down_start is not None else now
         else:
             head_down_start = None
         head_down = (
             head_down_start is not None
-            and (time.time() - head_down_start) >= HEAD_DOWN_DURATION_SEC
+            and (now - head_down_start) >= HEAD_DOWN_DURATION_SEC
         )
 
-        if face_found and abs(yaw) > YAW_DEVIATION_THRESHOLD:
-            yaw_dev_start = yaw_dev_start if yaw_dev_start is not None else time.time()
+        if pose_valid and abs(yaw) > YAW_DEVIATION_THRESHOLD:
+            yaw_dev_start = yaw_dev_start if yaw_dev_start is not None else now
         else:
             yaw_dev_start = None
         yaw_dev = (
             yaw_dev_start is not None
-            and (time.time() - yaw_dev_start) >= YAW_DEVIATION_DURATION_SEC
+            and (now - yaw_dev_start) >= YAW_DEVIATION_DURATION_SEC
         )
 
         # ── 疲劳评分器更新（模块 07）──────────
-        eye_closed_sec = eye_closed_counter / fps if face_found else 0.0
-        perclos_over = face_found and perclos_value > PERCLOS_THRESHOLD
+        perclos_over = eye_valid and perclos_valid_sec > 0 and perclos_value > PERCLOS_THRESHOLD
 
         # 眨眼统计（疲劳早期信号）
-        blink_stats = blink_analyzer.get_stats()
-        blink_rate_over = blink_stats["blink_rate"] >= BLINK_RATE_THRESHOLD
-        blink_dur_over = (
+        blink_stats = blink_analyzer.get_stats(now)
+        blink_rate_over = eye_valid and blink_stats["blink_rate"] >= BLINK_RATE_THRESHOLD
+        blink_dur_over = eye_valid and (
             blink_stats["avg_duration"] >= AVG_BLINK_DUR_THRESHOLD
             or blink_stats["slow_blink_rate"] >= SLOW_BLINK_RATE_THRESHOLD
         )
@@ -257,13 +272,13 @@ def main():
             "yaw_dev": yaw_dev,
             "blink_rate_over": blink_rate_over,
             "blink_dur_over": blink_dur_over,
-        })
+            "face_valid": face_found,
+        }, now=now, observed_dt=0.0 if frame_gap else dt)
         fatigue_score = scorer.get_score()
         fatigue_level, fatigue_label = scorer.get_level()
         active_sources = scorer.get_active_sources()
 
         # 报警蜂鸣（等级提升或处于 L2/L3 且冷却结束）
-        now = time.time()
         if fatigue_level >= 2 and fatigue_level > last_alert_level:
             last_alert_level = fatigue_level
             last_alert_time = now
@@ -291,6 +306,7 @@ def main():
                 f"{src['eye_close']:.2f}", f"{src['micro_sleep']:.2f}", f"{src['perclos']:.2f}",
                 f"{src['yawn']:.2f}", f"{src['yawn_freq']:.2f}", f"{src['head_down']:.2f}", f"{src['yaw_dev']:.2f}",
                 f"{src['blink_rate']:.2f}", f"{src['blink_dur']:.2f}",
+                int(face_found), int(pose_valid), int(eye_valid), f"{perclos_valid_sec:.3f}",
             ])
             log_file.flush()
 
@@ -312,7 +328,7 @@ def main():
         y_offset += 28
 
         # ── EAR 显示 ──────────────────────────
-        if face_found:
+        if eye_valid:
             color_left  = (0, 0, 255) if ear_left  < EAR_THRESHOLD else (0, 255, 0)
             color_right = (0, 0, 255) if ear_right < EAR_THRESHOLD else (0, 255, 0)
 
@@ -321,7 +337,7 @@ def main():
             y_offset += 22
 
             # 闭眼警告
-            if eye_closed_counter >= EAR_CONSECUTIVE_FRAMES:
+            if eye_closed_sec >= EAR_CONSECUTIVE_FRAMES / FPS_TARGET:
                 cv2.putText(frame, "EYES CLOSED!", (10, y_offset),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_left, 2)
                 y_offset += 22
@@ -359,7 +375,7 @@ def main():
         y_offset += 6
 
         # ── PERCLOS 显示 ───────────────────────
-        if face_found:
+        if eye_valid and perclos_valid_sec > 0:
             perclos_color = (0, 0, 255) if perclos_over else (0, 255, 255)
             cv2.putText(frame, f"PERCLOS: {perclos_value:.2f}  ({PERCLOS_WINDOW_SEC}s)", (10, y_offset),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, perclos_color, 2)
@@ -371,7 +387,7 @@ def main():
                 y_offset += 22
 
         # ── 眨眼统计显示（P0：疲劳早期信号）────
-        if face_found:
+        if eye_valid:
             blink_color = (0, 0, 255) if (blink_rate_over or blink_dur_over) else (0, 255, 255)
             cv2.putText(
                 frame,
@@ -391,7 +407,7 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
         # ── HeadPose 显示 ──────────────────────
-        if face_found and len(landmarks) >= 478:
+        if pose_valid:
             y_offset += 6
 
             # 角度数值
@@ -427,7 +443,7 @@ def main():
                     cv2.circle(frame, (px, py), 3, (255, 255, 0), -1)
 
         # 眼角标记点
-        if SHOW_EYE_POINTS and face_found and len(landmarks) >= 478:
+        if SHOW_EYE_POINTS and eye_valid:
             for idx in LEFT_EYE_INDICES + RIGHT_EYE_INDICES:
                 x, y = landmarks[idx]
                 px, py = int(x * w), int(y * h)
@@ -436,7 +452,7 @@ def main():
         # ── 顶部报警横幅（等级 ≥ L1 时显示）────
         if fatigue_level >= 1:
             banner_color = LEVEL_COLORS[fatigue_level]
-            flash = (fatigue_level == 3 and int(time.time() * 2) % 2 == 0)
+            flash = (fatigue_level == 3 and int(now * 2) % 2 == 0)
             if flash:
                 banner_color = (255, 255, 255)  # L3 红白闪烁
             cv2.rectangle(frame, (0, 0), (w, 36), banner_color, -1)
