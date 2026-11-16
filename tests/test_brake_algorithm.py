@@ -59,9 +59,10 @@ class BrakeAlgorithmTests(unittest.TestCase):
         self.assertEqual(box.a_final, 0.0)
 
     def test_accelerator_preserves_requested_aeb_brake(self):
-        box = make_box(fatigue=3)
-        update_brake_result(box)
-        expected = box.a_final
+        reference = make_box(distance=20.0, fatigue=3)
+        update_brake_result(reference)
+        expected = reference.a_final
+        box = make_box(distance=20.0, fatigue=3)
         box.a_driver = -7.0
         update_brake_result(box)
         self.assertTrue(box.warning)
@@ -111,7 +112,7 @@ class BrakeAlgorithmTests(unittest.TestCase):
         ):
             with self.subTest(speed=speed, gap=gap):
                 box = make_box(distance=gap, v_ego=speed, v_target=0.0)
-                update_brake_result(box)
+                update_brake_result(box, staged=False)
                 self.assertEqual(box.a_final, expected)
                 self.assertEqual(box.warning, expected > 0)
                 self.assertEqual(box.brake_level, int(expected > 0))
@@ -119,10 +120,10 @@ class BrakeAlgorithmTests(unittest.TestCase):
     def test_low_speed_uses_net_gap_independently_of_center_distance(self):
         box = make_box(distance=5.3, v_ego=10.075, v_target=10.0)
         box.bumper_gap_m = 0.8
-        update_brake_result(box)
+        update_brake_result(box, staged=False)
         self.assertEqual((box.a_final, box.ttc), (1.5, 999.0))
         box.target_valid = False
-        update_brake_result(box)
+        update_brake_result(box, staged=False)
         self.assertEqual(box.a_final, 0.0)
 
     def test_low_speed_ignores_non_closing_or_behind_target(self):
@@ -136,8 +137,58 @@ class BrakeAlgorithmTests(unittest.TestCase):
 
     def test_low_speed_retains_stronger_ttc_brake(self):
         box = make_box(distance=0.25, v_ego=0.9, v_target=0.0)
-        update_brake_result(box)
+        update_brake_result(box, staged=False)
         self.assertEqual((box.brake_level, box.a_final), (3, 8.0))
+
+    def test_staged_low_speed_uses_bumper_gap_and_ramps(self):
+        box = make_box(distance=5.3, v_ego=10.075, v_target=10.0)
+        box.bumper_gap_m = 0.8
+        update_brake_result(box)
+        self.assertEqual((box.brake_phase, box.brake_reference, box.ttc), ("light", 1.5, 999.0))
+        self.assertAlmostEqual(box.a_final, 0.12)
+        update_brake_result(box)
+        self.assertAlmostEqual(box.a_final, 0.24)
+
+    def test_staged_hold_then_release_with_bounded_slope(self):
+        box = make_box(distance=5.3, v_ego=10.075, v_target=10.0)
+        box.bumper_gap_m = 0.8
+        for _ in range(6):
+            update_brake_result(box)
+        box.v_ego = 9.0
+        for _ in range(14):
+            update_brake_result(box)
+            self.assertEqual(box.brake_phase, "light")
+        update_brake_result(box)
+        self.assertEqual(box.brake_phase, "release")
+        self.assertAlmostEqual(box.aeb_decel, 1.5 - 5*0.02)
+
+    def test_staged_emergency_skips_light_stage_and_respects_driver_brake(self):
+        box = make_box(distance=0.25, v_ego=0.9, v_target=0.0)
+        box.a_driver = 3.5
+        update_brake_result(box)
+        self.assertEqual((box.brake_phase, box.brake_reference), ("emergency", 8.0))
+        self.assertAlmostEqual(box.aeb_decel, 0.60)
+        self.assertEqual(box.a_final, 3.5)
+
+    def test_staged_stale_fatigue_uses_level_zero(self):
+        fresh = make_box(distance=45.0, v_ego=50/3.6, v_target=0, fatigue=3)
+        stale = make_box(distance=45.0, v_ego=50/3.6, v_target=0, fatigue=3)
+        stale.fatigue_valid = False
+        update_brake_result(fresh)
+        update_brake_result(stale)
+        self.assertEqual(fresh.brake_phase, "light")
+        self.assertEqual(stale.brake_level, 0)
+
+    def test_staged_target_change_discards_previous_latch(self):
+        box = make_box(distance=5.3, v_ego=10.075, v_target=10.0)
+        box.bumper_gap_m = 0.8
+        box.target_id = 1
+        update_brake_result(box)
+        self.assertGreater(box.a_final, 0.0)
+        box.target_id = 2
+        box.v_ego = 10.0
+        update_brake_result(box)
+        self.assertEqual((box.a_final, box.brake_phase), (0.0, "idle"))
 
     def test_closed_loop_following_fatigue_brakes_earlier(self):
         results = [

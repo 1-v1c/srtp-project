@@ -5,11 +5,15 @@
 import math
 from numbers import Integral
 
+from longitudinal_brake import BrakeFrame, LongitudinalBrake
+
 # ============================================================
 # 配置参数
 # ============================================================
 class BrakeConfig:
     A_MAX = 8.0
+    LONGITUDINAL_LATERAL_LIMIT_M = 1.25
+    LONGITUDINAL_HEADING_LIMIT_RAD = math.radians(15.0)
     T_PREFILL = 0.1
 
     T_REACTION_BASELINE = 0.7
@@ -94,11 +98,7 @@ def compute_brake(fatigue_level,
         ttc = 999.0
 
     # ========== 4. 航向角 & 运动类型 ==========
-    angle_diff = heading_ego - heading_target
-    while angle_diff > math.pi:
-        angle_diff -= 2 * math.pi
-    while angle_diff < -math.pi:
-        angle_diff += 2 * math.pi
+    angle_diff = math.remainder(heading_ego - heading_target, 2 * math.pi)
     motion_type = "comoving" if abs(angle_diff) < math.pi / 2 else "oncoming"
 
     # ========== 5. TTB计算 + 数值稳定性保护 ==========
@@ -237,38 +237,95 @@ def compute_brake(fatigue_level,
         'trigger_threshold': round(trigger_threshold, 3)
     }
 
-def update_brake_result(box):
-    """
-    从数据盒子读数据 → 调用核心算法 → 把结果写回盒子
-    由CARLA主循环每帧调用一次
-    """
-    # target_valid 由上游设置，表示目标已确认为自车行驶路径上的威胁。
+def update_brake_result(box, *, dt_sec=0.02, staged=True):
+    """Update one DataBox frame. Pass the control period when using other than 50 Hz."""
     if not box.target_valid:
+        reset_brake_controller(box)
         box.a_final = min(BrakeConfig.A_MAX, box.a_driver) if box.a_driver >= 0.1 else 0.0
         box.warning = False
         box.brake_level = 0
         box.ttc = 999.0
         return
 
+    fatigue = box.fatigue_level if getattr(box, "fatigue_valid", True) else 0
+    gap = getattr(box, "bumper_gap_m", None)
+    kinematics = (box.v_ego, box.v_target, box.a_target, box.d, box.dx, box.dy,
+                  box.heading_ego, box.heading_target, box.a_driver)
+    if not all(math.isfinite(value) for value in kinematics):
+        raise ValueError("brake inputs must be finite")
+    if min(box.v_ego, box.v_target, box.d) < 0:
+        raise ValueError("speed and distance must be non-negative")
     result = compute_brake(
-        fatigue_level=box.fatigue_level,           # 来自疲劳检测同学
-        v_ego=box.v_ego,                           # 来自CARLA仿真同学
-        v_target=box.v_target,                     # 来自障碍物识别同学
-        a_target=box.a_target,                     # 来自障碍物识别同学
-        d=box.d,                                   # 来自障碍物识别同学
+        fatigue_level=fatigue,
+        v_ego=box.v_ego,
+        v_target=box.v_target,
+        a_target=box.a_target,
+        d=box.d,
         dx=box.dx,
         dy=box.dy,
-        heading_ego=box.heading_ego,               # 来自CARLA仿真同学
-        heading_target=box.heading_target,         # 来自障碍物识别同学
-        a_driver=box.a_driver,                     # 来自CARLA仿真同学
-        bumper_gap_m=getattr(box, 'bumper_gap_m', None),
+        heading_ego=box.heading_ego,
+        heading_target=box.heading_target,
+        a_driver=box.a_driver,
+        bumper_gap_m=gap,
     )
-    
-    # 2. 把结果写回盒子
-    box.a_final = result['a_final']                # 车辆最终期望制动减速度
-    box.warning = result['warning']                # 预警触发标志
-    box.brake_level = result['brake_level']        # 制动强度等级 0/1/2/3
-    box.ttc = result['ttc']                        # 实时碰撞时间
+    box.ttc = result["ttc"]
+
+    cos_ego, sin_ego = math.cos(box.heading_ego), math.sin(box.heading_ego)
+    ahead = box.dx * cos_ego + box.dy * sin_ego
+    lateral = box.dy * cos_ego - box.dx * sin_ego
+    alignment = math.cos(box.heading_target - box.heading_ego)
+    longitudinal = (
+        ahead > 0 and abs(lateral) <= BrakeConfig.LONGITUDINAL_LATERAL_LIMIT_M
+        and (box.v_target == 0 or alignment >= math.cos(BrakeConfig.LONGITUDINAL_HEADING_LIMIT_RAD))
+    )
+    gap = box.d if gap is None else gap
+    if not staged or not longitudinal or not math.isfinite(gap):
+        reset_brake_controller(box)
+        box.a_final = result["a_final"]
+        box.warning = result["warning"]
+        box.brake_level = result["brake_level"]
+        box.brake_reference = box.aeb_decel = result["a_AEB"]
+        box.brake_phase = "legacy"
+        return
+
+    delay = getattr(box, "brake_response_delay_sec", 0.15)
+    available = getattr(box, "available_decel_mps2", BrakeConfig.A_MAX)
+    actuator_jerk = getattr(box, "actuator_jerk_mps3", 30.0)
+    ego_accel = getattr(box, "ego_accel_mps2", None)
+    ego_accel = 0.0 if ego_accel is None else ego_accel
+    if (not all(math.isfinite(v) for v in (delay, available, actuator_jerk, ego_accel))
+            or delay < 0 or available <= 0 or actuator_jerk <= 0):
+        raise ValueError("invalid actuator delay, deceleration or jerk")
+
+    target_id = getattr(box, "target_id", None)
+    controller = getattr(box, "_longitudinal_brake", None)
+    if controller is None or target_id != getattr(box, "_longitudinal_target_id", None):
+        controller = LongitudinalBrake()
+        box._longitudinal_brake = controller
+        box._longitudinal_target_id = target_id
+
+    command = controller.step(BrakeFrame(
+        gap, box.v_ego, box.v_target, ego_accel, box.a_target, fatigue,
+        delay, min(available, BrakeConfig.A_MAX), actuator_jerk,
+    ), dt_sec)
+    box.brake_reference = command.reference
+    box.aeb_decel = command.decel
+    box.brake_phase = command.phase
+    box.light_gap_margin = command.light_gap_margin
+    driver_decel = box.a_driver if box.a_driver >= 0.1 else 0.0
+    box.a_final = min(available, BrakeConfig.A_MAX, max(command.decel, driver_decel))
+    box.warning = command.warning
+    box.brake_level = command.level
+
+
+def reset_brake_controller(box):
+    """Clear per-episode AEB state when restarting or invalidating the target."""
+    box._longitudinal_brake = None
+    box._longitudinal_target_id = None
+    box.brake_reference = 0.0
+    box.aeb_decel = 0.0
+    box.brake_phase = "idle"
+    box.light_gap_margin = None
 
 
 # 本地自测

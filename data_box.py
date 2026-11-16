@@ -23,3 +23,7 @@ class DataBox:
         self.warning = False            # 预警触发标志（联合声光提示）
         self.brake_level = 0            # 制动强度等级 0/1/2/3
         self.ttc = 999.0                # 实时碰撞时间 (s)
+        self.brake_reference = 0.0     # 决策层目标减速度 (m/s²)
+        self.aeb_decel = 0.0           # 限速后的 AEB 减速度 (m/s²)
+        self.brake_phase = "idle"
+        self.light_gap_margin = None   # 预测轻制动最小净距减去目标余量 (m)
