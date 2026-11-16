@@ -1,11 +1,9 @@
 """
 制动算法模块 - brake_algorithm.py
-升级修改：
-1. 增加疲劳等级对TTC阈值缩放，疲劳越高，预警阈值越大
-2. 采用方案2：trigger_threshold = max(t_warning, TTC_WARNING)，保留TTB原有架构，实现疲劳工况AEB更早介入
-原有全部基础逻辑、接口保持不变
+使用驾驶员疲劳等级缩放 TTC 阈值，并与 TTB 预警时长共同决定制动等级。
 """
 import math
+from numbers import Integral
 
 # ============================================================
 # 配置参数
@@ -22,6 +20,10 @@ class BrakeConfig:
     VREL_STEP_SCALE = 0.15
     VREL_STEP_KMH = 10
     SCALE_MAX = 2.5        # 放大系数上限
+    VREL_FULL_DISTANCE_M = 25.0
+    VREL_ZERO_DISTANCE_M = 30.0
+    VREL_START_CLOSING_MPS = 3.0
+    VREL_FULL_CLOSING_MPS = 4.0
 
     # 基准TTC分级阈值(L0基准值)
     BASE_TTC_EMERGENCY = 1.2
@@ -45,7 +47,10 @@ def compute_brake(fatigue_level,
                   d, dx, dy,
                   heading_ego, heading_target,
                   a_driver):
+    """计算有效威胁目标的制动。a_driver 为正表示制动，为负表示加速。"""
     config = BrakeConfig()
+    if isinstance(fatigue_level, bool) or not isinstance(fatigue_level, Integral) or not 0 <= fatigue_level <= 3:
+        raise ValueError("fatigue_level must be an integer from 0 to 3")
 
     # ========== 根据疲劳等级动态放大TTC阈值 ===========
     scale = config.FATIGUE_TTC_SCALE[fatigue_level]
@@ -112,12 +117,20 @@ def compute_brake(fatigue_level,
     ttb = max(ttb, 0)
     t_warning = config.T_PREFILL + t_reaction + ttb
 
-    # ========== 6. 相对速度预警时长放大（带上限） ==========
-    v_rel_kmh = v_rel_mag * 3.6
-    if closing_speed > 3.0 and d < 30.0:
-        scale_v = 1.0 + (v_rel_kmh / config.VREL_STEP_KMH) * config.VREL_STEP_SCALE
-        scale_v = min(scale_v, config.SCALE_MAX)
-        t_warning = t_warning * scale_v
+    # ========== 6. 距离和接近速度连续过渡的预警放大 ==========
+    distance_weight = (config.VREL_ZERO_DISTANCE_M - d) / (
+        config.VREL_ZERO_DISTANCE_M - config.VREL_FULL_DISTANCE_M
+    )
+    closing_weight = (closing_speed - config.VREL_START_CLOSING_MPS) / (
+        config.VREL_FULL_CLOSING_MPS - config.VREL_START_CLOSING_MPS
+    )
+    distance_weight = min(1.0, max(0.0, distance_weight))
+    closing_weight = min(1.0, max(0.0, closing_weight))
+    full_scale = min(
+        1.0 + (v_rel_mag * 3.6 / config.VREL_STEP_KMH) * config.VREL_STEP_SCALE,
+        config.SCALE_MAX,
+    )
+    t_warning *= 1.0 + distance_weight * closing_weight * (full_scale - 1.0)
 
     # ========== 7. AEB期望制动强度分级【方案2核心修改】 ==========
     ratio_emo = TTC_EMERGENCY / TTC_WARNING
@@ -143,18 +156,15 @@ def compute_brake(fatigue_level,
         brake_level = 0
 
     # ========== 8. 驾驶员意图判定 ==========
-    driver_brake_abs = abs(a_driver)
-    brake_not_enough = warning and (driver_brake_abs < a_AEB * config.BRAKE_SHORT_RATIO)
+    driver_brake = max(0.0, a_driver)
+    brake_not_enough = warning and (driver_brake < a_AEB * config.BRAKE_SHORT_RATIO)
 
     if a_driver < 0:
         intent_type = "conflict"
         intent_conflict = True
-    elif driver_brake_abs >= 0.5 and not brake_not_enough:
-        intent_type = "consist"
-        intent_conflict = False
-    elif driver_brake_abs >= 0.5 and brake_not_enough:
-        intent_type = "conflict"
-        intent_conflict = True
+    elif driver_brake >= 0.5:
+        intent_type = "conflict" if brake_not_enough else "consist"
+        intent_conflict = brake_not_enough
     else:
         intent_type = "no_react"
         intent_conflict = False
@@ -167,18 +177,13 @@ def compute_brake(fatigue_level,
     else:
         w = config.W_CONFLICT[fatigue_level]
 
-    if abs(a_driver) < 0.1:
-        # 驾驶员无操作，AEB直接输出期望制动
+    if driver_brake < 0.1:
+        # 驾驶员踩油门或制动处于死区时，制动输出取 AEB 需求。
         a_final = a_AEB
-    elif driver_brake_abs > a_AEB:
-        # 驾驶员制动力度大于AEB需求，信任驾驶员
-        a_final = driver_brake_abs
-    elif a_driver < 0:
-        # 驾驶员踩油门，仅使用AEB制动力
-        a_final = a_AEB
+    elif driver_brake > a_AEB:
+        a_final = driver_brake
     else:
-        # 驾驶员制动但力度不足，加权协同
-        a_final = w * a_AEB + (1 - w) * driver_brake_abs
+        a_final = w * a_AEB + (1 - w) * driver_brake
 
     a_final = min(a_final, config.A_MAX)
 
@@ -205,13 +210,22 @@ def update_brake_result(box):
     从数据盒子读数据 → 调用核心算法 → 把结果写回盒子
     由CARLA主循环每帧调用一次
     """
-    # 1. 从盒子读取所有人写入的数据
+    # target_valid 由上游设置，表示目标已确认为自车行驶路径上的威胁。
+    if not box.target_valid:
+        box.a_final = min(BrakeConfig.A_MAX, box.a_driver) if box.a_driver >= 0.1 else 0.0
+        box.warning = False
+        box.brake_level = 0
+        box.ttc = 999.0
+        return
+
     result = compute_brake(
         fatigue_level=box.fatigue_level,           # 来自疲劳检测同学
         v_ego=box.v_ego,                           # 来自CARLA仿真同学
         v_target=box.v_target,                     # 来自障碍物识别同学
         a_target=box.a_target,                     # 来自障碍物识别同学
         d=box.d,                                   # 来自障碍物识别同学
+        dx=box.dx,
+        dy=box.dy,
         heading_ego=box.heading_ego,               # 来自CARLA仿真同学
         heading_target=box.heading_target,         # 来自障碍物识别同学
         a_driver=box.a_driver                      # 来自CARLA仿真同学
