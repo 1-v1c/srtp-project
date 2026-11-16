@@ -49,6 +49,20 @@ fatigue_detection/
 
 ## 安装与运行
 
+### 浏览器仪表盘
+
+Windows 双击 `启动DMS网页版.bat`，或在项目根目录运行：
+
+```powershell
+python src/main.py --web
+```
+
+服务默认在本机 `http://127.0.0.1:8765/`，摄像头画面、疲劳等级与观测数据分开显示。可通过 `--camera 0` 指定内置摄像头。未指定设备时优先使用配置里的设备，打开失败时尝试设备 0。需要分心检测时，请使用包含 YOLO 依赖和本地权重的运行环境。
+
+页面上的「停止监测」释放摄像头并保存日志，终端按 `Ctrl+C` 退出服务。浏览器使用等级颜色与状态提示，适合静音录屏。
+
+### OpenCV 窗口与采集工具
+
 ```powershell
 pip install -r requirements.txt
 

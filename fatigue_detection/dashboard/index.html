@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Fatigue Detection · DMS</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script src="/dashboard.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="identity">
+      <span class="identity-icon" aria-hidden="true"><i></i></span>
+      <div><h1>Fatigue Detection</h1><p>驾驶员状态监测</p></div>
+    </div>
+    <div class="session">
+      <span class="connection" id="connection" aria-live="polite"><i></i><span id="connection-text">连接中</span></span>
+      <span class="session-time" id="session-time" title="会话时长">00:00</span>
+      <button id="stop" class="button stop" type="button" disabled>停止监测</button>
+    </div>
+  </header>
+
+  <main class="dashboard">
+    <section class="panel camera" aria-labelledby="video-title">
+      <div class="panel-head">
+        <div><h2 id="video-title">实时画面</h2><p id="camera-meta">本机摄像头</p></div>
+        <div class="controls">
+          <label class="toggle"><input id="mesh" type="checkbox" disabled><span>关键点</span></label>
+          <a class="button" id="snapshot" aria-disabled="true" tabindex="-1">截图</a>
+        </div>
+      </div>
+      <div class="viewport">
+        <img id="video" alt="驾驶员摄像头实时画面" hidden>
+        <div class="video-placeholder" id="video-placeholder" role="status">
+          <span class="placeholder-mark" aria-hidden="true"></span>
+          <strong id="video-message">正在连接摄像头</strong>
+        </div>
+      </div>
+      <div class="camera-foot">
+        <span id="face-status" class="status-item">人脸 <strong>—</strong></span>
+        <span id="pose-status" class="status-item">头姿 <strong>—</strong></span>
+        <span id="eyes-status" class="status-item">眼部 <strong>—</strong></span>
+        <span id="fps" class="fps">— FPS</span>
+      </div>
+    </section>
+
+    <section class="panel monitoring" aria-labelledby="fatigue-title">
+      <div class="panel-head"><div><h2 id="fatigue-title">疲劳评估</h2><p>当前等级与主要指标</p></div>
+        <button id="reset" class="button" type="button" disabled>重置评分</button>
+      </div>
+      <div class="risk" id="risk" data-level="idle">
+        <div class="risk-grade" id="grade">—</div>
+        <div class="risk-label"><strong id="risk-title">等待观测</strong><span id="risk-note">摄像头接入后更新</span></div>
+        <div class="risk-score"><span>疲劳分数</span><strong id="score">—</strong></div>
+      </div>
+      <div class="levels" id="levels" aria-label="疲劳等级 L0 到 L3">
+        <span>L0</span><span>L1</span><span>L2</span><span>L3</span>
+      </div>
+      <dl class="metrics">
+        <div class="metric"><dt>眼部开合 <span>EAR</span></dt><dd id="ear">—</dd><small id="ear-detail">左眼 — · 右眼 —</small></div>
+        <div class="metric"><dt>嘴部开合 <span>MAR</span></dt><dd id="mar">—</dd><small id="yawns">哈欠 — 次</small></div>
+        <div class="metric"><dt>闭眼比例 <span>PERCLOS</span></dt><dd id="perclos">—</dd><small id="perclos-detail">30 秒窗口</small></div>
+        <div class="metric"><dt>持续闭眼</dt><dd id="closure">—</dd><small id="closure-detail">等待有效眼部观测</small></div>
+      </dl>
+      <div class="distraction">
+        <div><h3>分心检测</h3><p id="distraction-result">等待模型</p></div>
+        <label class="toggle"><input id="distraction" type="checkbox" disabled><span>启用</span></label>
+      </div>
+    </section>
+
+    <section class="panel trend" aria-labelledby="trend-title">
+      <div class="panel-head"><div><h2 id="trend-title">疲劳分数趋势</h2><p>最近 30 秒</p></div>
+        <span class="trend-key"><i></i>评分</span></div>
+      <div class="chart"><canvas id="chart" role="img" aria-label="最近三十秒的疲劳分数曲线"></canvas></div>
+    </section>
+
+    <section class="panel details" aria-labelledby="detail-title">
+      <div class="panel-head"><div><h2 id="detail-title">观测明细</h2><p>头部姿态与眨眼</p></div></div>
+      <dl class="detail-values">
+        <div><dt>俯仰 Pitch</dt><dd id="pitch">—</dd></div>
+        <div><dt>偏航 Yaw</dt><dd id="yaw">—</dd></div>
+        <div><dt>横滚 Roll</dt><dd id="roll">—</dd></div>
+        <div><dt>眨眼频率</dt><dd id="blink-rate">—</dd></div>
+        <div><dt>平均眨眼时长</dt><dd id="blink-ms">—</dd></div>
+      </dl>
+      <div class="sources"><h3>分数来源</h3><ul id="sources"><li class="muted">暂无活动信号</li></ul></div>
+    </section>
+    <p id="action-feedback" class="feedback" role="status" hidden></p>
+  </main>
+</body>
+</html>

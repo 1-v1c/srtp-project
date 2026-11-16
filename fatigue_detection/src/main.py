@@ -11,6 +11,8 @@ Phase 7: + 眨眼动力学特征（疲劳早期信号）
 按 'q' 退出 | 按 's' 截图 | 按 'r' 重置疲劳评分
 """
 
+import argparse
+from contextlib import ExitStack
 import os
 import csv
 import time
@@ -53,19 +55,33 @@ LEVEL_COLORS = {
 }
 
 
-def main():
-    # ── 初始化 ──────────────────────────────
+def main(*, dashboard=None, camera_id=None):
     print("打开摄像头...")
-    cam = Camera()
-    if not cam.open():
-        print("[ERROR] 无法打开摄像头！")
-        return
-    print(f"   分辨率: {cam.resolution[0]}x{cam.resolution[1]}")
+    with ExitStack() as resources:
+        cam = Camera() if camera_id is None else Camera(camera_id=camera_id)
+        resources.callback(cam.release)
+        opened = cam.open()
+        if not opened and dashboard is not None and camera_id is None and cam.camera_id != 0:
+            cam.release()
+            cam = Camera(camera_id=0)
+            resources.callback(cam.release)
+            opened = cam.open()
+        if not opened:
+            message = "无法打开摄像头。请检查设备编号或关闭正在占用摄像头的应用。"
+            print(f"[ERROR] {message}")
+            if dashboard is not None:
+                dashboard.status("error", message)
+            return
 
-    print("[LOAD] 加载 MediaPipe Face Mesh...")
-    detector = FaceMeshDetector()
-    print("   就绪！\n")
+        print(f"   分辨率: {cam.resolution[0]}x{cam.resolution[1]}")
+        detector = FaceMeshDetector()
+        resources.callback(detector.close)
+        if dashboard is None:
+            resources.callback(cv2.destroyAllWindows)
+        run_session(cam, detector, resources, dashboard)
 
+
+def run_session(cam, detector, resources, dashboard):
     # 平滑器
     ear_smoother = EARSmoother(window_size=5)
     mar_smoother = MARSmoother(window_size=5)
@@ -87,11 +103,12 @@ def main():
 
     # 疲劳评分器（模块 07）
     scorer = FatigueScorer()
+    distraction = None
 
     # 运行日志（每秒快照写入 CSV）
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, f"run_{time.strftime('%Y%m%d_%H%M%S')}.csv")
-    log_file = open(log_path, "w", newline="", encoding="utf-8-sig")
+    log_file = resources.enter_context(open(log_path, "w", newline="", encoding="utf-8-sig"))
     log_writer = csv.writer(log_file)
     log_writer.writerow([
         "t", "score", "level", "ear_avg", "mar", "perclos",
@@ -126,8 +143,20 @@ def main():
 
     print("[OK] 疲劳评分器就绪。按 r 重置评分，q 退出\n")
 
+    show_face_mesh = SHOW_FACE_MESH
+    score_revision = 0
     # ── 主循环 ──────────────────────────────
-    while True:
+    while dashboard is None or not dashboard.stop.is_set():
+        if dashboard is not None:
+            for action, enabled in dashboard.pending_actions():
+                if action == "reset":
+                    scorer.reset()
+                    score_revision += 1
+                elif action == "mesh":
+                    show_face_mesh = enabled
+                elif action == "distraction" and distraction is not None:
+                    distraction.reset()
+                    distraction.enabled = enabled
         ret, frame = cam.read()
         if not ret:
             break
@@ -151,7 +180,7 @@ def main():
         results = detector.detect(frame)
 
         # 画绿网
-        if SHOW_FACE_MESH:
+        if show_face_mesh:
             detector.draw_mesh(frame, results)
 
         # ── 特征提取 ──────────────────────────
@@ -282,14 +311,14 @@ def main():
         if fatigue_level >= 2 and fatigue_level > last_alert_level:
             last_alert_level = fatigue_level
             last_alert_time = now
-            if _HAS_SOUND:
+            if dashboard is None and _HAS_SOUND:
                 winsound.Beep(1500 if fatigue_level == 2 else 2200, 400)
                 print(f"[ALERT] {fatigue_label}！分数={fatigue_score:.1f} 来源={[s[0] for s in active_sources]}")
         elif fatigue_level < 2:
             last_alert_level = fatigue_level
         elif fatigue_level >= 2 and now - last_alert_time >= ALERT_COOLDOWN_SEC:
             last_alert_time = now
-            if _HAS_SOUND:
+            if dashboard is None and _HAS_SOUND:
                 winsound.Beep(1000, 200)
 
         # 运行日志：每秒快照一行
@@ -309,6 +338,39 @@ def main():
                 int(face_found), int(pose_valid), int(eye_valid), f"{perclos_valid_sec:.3f}",
             ])
             log_file.flush()
+
+        if dashboard is not None:
+            dashboard.publish(frame, {
+                "elapsed": round(now - _t0, 3),
+                "fps": float(cam.fps),
+                "camera": cam.camera_id,
+                "resolution": [w, h],
+                "level": fatigue_level,
+                "score": float(fatigue_score),
+                "revision": score_revision,
+                "sources": {name: float(value) for name, value in active_sources},
+                "face_valid": bool(face_found),
+                "pose_valid": bool(pose_valid),
+                "eye_valid": bool(eye_valid),
+                "ear": float(ear_avg) if eye_valid else None,
+                "ear_left": float(ear_left) if eye_valid else None,
+                "ear_right": float(ear_right) if eye_valid else None,
+                "mar": float(mar_val) if face_found else None,
+                "perclos": float(perclos_value) if eye_valid and perclos_valid_sec > 0 else None,
+                "perclos_valid_sec": float(perclos_valid_sec),
+                "perclos_threshold": PERCLOS_THRESHOLD,
+                "perclos_window": PERCLOS_WINDOW_SEC,
+                "eye_closed_sec": float(eye_closed_sec) if eye_valid else None,
+                "pitch": float(pitch) if pose_valid else None,
+                "yaw": float(yaw) if pose_valid else None,
+                "roll": float(roll) if pose_valid else None,
+                "blink_rate": float(blink_stats["blink_rate"]) if eye_valid else None,
+                "blink_ms": 1000 * float(blink_stats["avg_duration"]) if eye_valid else None,
+                "yawns": yawn_count,
+                "mesh": show_face_mesh,
+                "distraction": {"available": False, "enabled": False, "result": None},
+            })
+            continue
 
         # ── 画面显示 ──────────────────────────
         y_offset = 30
@@ -479,13 +541,27 @@ def main():
             scorer.reset()
             print("[RESET] 疲劳评分已重置")
 
-    # ── 清理 ────────────────────────────────
-    cam.release()
-    detector.close()
-    log_file.close()
-    cv2.destroyAllWindows()
-    print(f"[OK] 已释放所有资源，运行日志已保存: {log_path}")
+    if dashboard is not None:
+        if dashboard.stop.is_set():
+            dashboard.status("stopped", "监测已停止。重新启动程序即可继续。")
+        else:
+            dashboard.status("error", "摄像头画面中断。请检查连接后重启程序。")
+    print(f"[OK] 运行日志已保存: {log_path}")
+
+
+def cli():
+    parser = argparse.ArgumentParser(description="DMS 疲劳检测")
+    parser.add_argument("--web", action="store_true", help="打开本机浏览器仪表盘")
+    parser.add_argument("--camera", type=int, help="指定摄像头设备编号")
+    parser.add_argument("--port", type=int, default=8765, help="浏览器仪表盘端口")
+    parser.add_argument("--no-open", action="store_true", help="运行仪表盘但不自动打开浏览器")
+    args = parser.parse_args()
+    if args.web:
+        from web_dashboard import run_dashboard
+        run_dashboard(main, args.port, args.camera, not args.no_open)
+    else:
+        main(camera_id=args.camera)
 
 
 if __name__ == "__main__":
-    main()
+    cli()

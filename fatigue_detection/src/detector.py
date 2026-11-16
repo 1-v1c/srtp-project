@@ -5,6 +5,7 @@ MediaPipe Face Mesh 检测器模块（Tasks API 版本）
 """
 
 import os
+from pathlib import Path
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -31,15 +32,15 @@ class FaceMeshDetector:
     """MediaPipe Face Landmarker 封装（Tasks API）"""
 
     def __init__(self, model_path: str = None):
-        model_path = model_path or FACE_LANDMARKER_MODEL_PATH
+        configured_path = model_path or FACE_LANDMARKER_MODEL_PATH
+        if os.path.exists(configured_path):
+            base_options = tasks.BaseOptions(model_asset_path=configured_path)
+        elif model_path is None:
+            bundled_model = Path(__file__).resolve().parents[1] / "models/face_landmarker.task"
+            base_options = tasks.BaseOptions(model_asset_buffer=bundled_model.read_bytes())
+        else:
+            raise FileNotFoundError(f"模型文件未找到: {model_path}")
 
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(
-                f"模型文件未找到: {model_path}\n"
-                f"请在 config.py 中设置 FACE_LANDMARKER_MODEL_PATH"
-            )
-
-        base_options = tasks.BaseOptions(model_asset_path=model_path)
         options = vision.FaceLandmarkerOptions(
             base_options=base_options,
             running_mode=vision.RunningMode.VIDEO,
