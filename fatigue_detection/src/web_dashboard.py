@@ -23,6 +23,7 @@ ASSETS = {
 class Dashboard:
     def __init__(self):
         self.stop = Event()
+        self.paused = Event()
         self._updates = Condition()
         self._actions = Queue(maxsize=12)
         self._state = {"status": "starting", "message": "正在初始化摄像头和模型"}
@@ -61,12 +62,22 @@ class Dashboard:
             return self._version, self._jpeg if version != self._version else None
 
     def queue_action(self, action, value):
-        if action == "stop":
-            self.stop.set()
-            with self._updates:
-                self._updates.notify_all()
-        else:
+        if action not in ("pause", "resume", "stop"):
             self._actions.put_nowait((action, value))
+            return
+        with self._updates:
+            if action == "pause":
+                self.paused.set()
+            elif action == "resume":
+                self.paused.clear()
+            else:
+                self.stop.set()
+            self._updates.notify_all()
+
+    def wait_for_resume(self):
+        with self._updates:
+            self._updates.wait_for(lambda: not self.paused.is_set() or self.stop.is_set())
+            return not self.stop.is_set()
 
     def pending_actions(self):
         while True:
@@ -159,12 +170,15 @@ def create_server(dashboard, port):
                     raise ValueError
                 body = json.loads(self.rfile.read(size))
                 action, value = body["action"], body.get("enabled")
-                if action not in ("reset", "mesh", "distraction", "stop"):
+                if action not in ("reset", "mesh", "distraction", "pause", "resume", "stop"):
                     raise ValueError
                 if action in ("mesh", "distraction") and not isinstance(value, bool):
                     raise ValueError
-                if dashboard.snapshot()[0]["status"] != "live":
-                    self.json_response(409, {"error": "监测未运行"})
+                allowed_status = ("paused",) if action == "resume" else ("live",)
+                if action == "stop":
+                    allowed_status = ("live", "paused", "resuming")
+                if dashboard.snapshot()[0]["status"] not in allowed_status:
+                    self.json_response(409, {"error": "当前监测状态无法执行该操作"})
                     return
                 dashboard.queue_action(action, value)
             except (ValueError, KeyError, TypeError, AttributeError):

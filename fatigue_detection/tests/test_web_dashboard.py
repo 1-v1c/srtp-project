@@ -74,6 +74,22 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.request("POST", path, '{"action":"stop"}', headers)[0], 202)
         self.assertTrue(self.dashboard.stop.is_set())
 
+    def test_pause_clears_frame_and_resume_wakes_capture(self):
+        self.publish()
+        path = "/api/actions"
+        headers = {"X-DMS-Action": "1", "Content-Type": "application/json"}
+        self.assertEqual(self.request("POST", path, '{"action":"resume"}', headers)[0], 409)
+        self.assertEqual(self.request("POST", path, '{"action":"pause"}', headers)[0], 202)
+        self.assertTrue(self.dashboard.paused.is_set())
+        self.dashboard.status("paused", "等待继续")
+        self.assertEqual(self.request("GET", "/api/frame.jpg")[0], 503)
+        resume_result = []
+        worker = Thread(target=lambda: resume_result.append(self.dashboard.wait_for_resume()), daemon=True)
+        worker.start()
+        self.assertEqual(self.request("POST", path, '{"action":"resume"}', headers)[0], 202)
+        worker.join(timeout=1)
+        self.assertEqual(resume_result, [True])
+
 
 if __name__ == "__main__":
     unittest.main()

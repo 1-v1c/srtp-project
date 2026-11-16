@@ -147,6 +147,14 @@ def run_session(cam, detector, resources, dashboard):
     score_revision = 0
     # ── 主循环 ──────────────────────────────
     while dashboard is None or not dashboard.stop.is_set():
+        resumed = False
+        if dashboard is not None and dashboard.paused.is_set():
+            perclos_counter.update(None, time.monotonic())
+            if not resume_camera(cam, dashboard):
+                break
+            last_log_time = float("-inf")
+            resumed = True
+
         if dashboard is not None:
             for action, enabled in dashboard.pending_actions():
                 if action == "reset":
@@ -166,7 +174,7 @@ def run_session(cam, detector, resources, dashboard):
         now = time.monotonic()
         dt = 0.0 if previous_frame_time is None else now - previous_frame_time
         previous_frame_time = now
-        frame_gap = dt > MAX_OBSERVATION_GAP_SEC
+        frame_gap = resumed or dt > MAX_OBSERVATION_GAP_SEC
         if frame_gap:
             eye_closed_start = head_down_start = yaw_dev_start = None
             yawn_start_time = yawn_gap_start = None
@@ -547,6 +555,22 @@ def run_session(cam, detector, resources, dashboard):
         else:
             dashboard.status("error", "摄像头画面中断。请检查连接后重启程序。")
     print(f"[OK] 运行日志已保存: {log_path}")
+
+
+def resume_camera(cam, dashboard):
+    cam.release()
+    message = "监测已暂停，点击「继续监测」接着记录。"
+    while not dashboard.stop.is_set():
+        dashboard.status("paused", message)
+        if not dashboard.wait_for_resume():
+            break
+        dashboard.status("resuming", "正在重新打开摄像头")
+        if cam.open():
+            return not dashboard.stop.is_set()
+        cam.release()
+        dashboard.paused.set()
+        message = "摄像头暂不可用。关闭占用它的应用后，点击「继续监测」重试。"
+    return False
 
 
 def cli():

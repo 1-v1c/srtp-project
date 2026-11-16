@@ -18,6 +18,8 @@ const activeActions = new Set();
 let lastState = null;
 let revision = null;
 let lastStreamAttempt = 0;
+let timelineBreak = false;
+let lastElapsed = 0;
 
 function write(id, value) {
   const el = $(id);
@@ -47,7 +49,10 @@ function setVideo(live, message) {
     lastStreamAttempt = performance.now();
     video.src = `/api/stream?start=${Date.now()}`;
   }
-  if (!live && video.hasAttribute("src")) video.removeAttribute("src");
+  if (!live) {
+    video.removeAttribute("src");
+    lastStreamAttempt = -Infinity;
+  }
   const visible = live && video.hasAttribute("src");
   video.hidden = !visible;
   placeholder.hidden = visible;
@@ -96,7 +101,12 @@ function renderSources(data) {
 function render(state) {
   lastState = state;
   const live = state.status === "live";
-  const states = { starting: "启动中", live: "实时监测", stopped: "已停止", error: "设备异常", offline: "连接中断" };
+  const paused = state.status === "paused";
+  const resuming = state.status === "resuming";
+  const states = {
+    starting: "启动中", live: "实时监测", paused: "已暂停", resuming: "恢复中",
+    stopped: "已停止", error: "设备异常", offline: "连接中断",
+  };
   $("connection").dataset.state = state.status;
   write("connection-text", states[state.status] ?? "连接中");
   setVideo(live, state.message ?? "正在连接摄像头");
@@ -106,12 +116,17 @@ function render(state) {
   snapshot.tabIndex = live ? 0 : -1;
   if (live) snapshot.href = "/api/frame.jpg";
   else snapshot.removeAttribute("href");
-  for (const control of ["mesh", "reset", "stop"]) {
+  for (const control of ["mesh", "reset"]) {
     $(control).disabled = !live || activeActions.has(control);
   }
+  $("pause").disabled = (!live && !paused) || activeActions.has("pause");
+  $("pause").dataset.resume = String(paused);
+  write("pause", paused || resuming ? "继续监测" : "暂停监测");
   if (!activeActions.has("mesh")) $("mesh").checked = live && Boolean(state.mesh);
 
-  const time = live ? Math.floor(state.elapsed) : 0;
+  if (live) lastElapsed = state.elapsed;
+  else if (!paused && !resuming) lastElapsed = 0;
+  const time = Math.floor(lastElapsed);
   write("session-time", `${String(Math.floor(time / 60)).padStart(2, "0")}:${String(time % 60).padStart(2, "0")}`);
   write("camera-meta", live ? `设备 ${state.camera} · ${state.resolution.join(" × ")}` : "本机摄像头");
   write("fps", number(state.fps, 1, " FPS"));
@@ -121,7 +136,7 @@ function render(state) {
 
   $("risk").dataset.level = live ? state.level : "idle";
   write("grade", live ? `L${state.level}` : "—");
-  write("risk-title", live ? fatigueLabels[state.level] : "等待观测");
+  write("risk-title", live ? fatigueLabels[state.level] : (paused ? "监测已暂停" : "等待观测"));
   write("risk-note", live ? (state.eye_valid ? "眼部信号有效" : "当前眼部信号不可用") : "当前没有实时数据");
   write("score", number(state.score, 2));
   for (const [index, mark] of [...$("levels").children].entries()) {
@@ -148,8 +163,13 @@ function render(state) {
       revision = state.revision;
       points.length = 0;
     }
-    if (!points.length || state.elapsed > points.at(-1)[0]) points.push([state.elapsed, state.score]);
+    if (!points.length || state.elapsed > points.at(-1)[0]) {
+      points.push([state.elapsed, state.score, timelineBreak]);
+      timelineBreak = false;
+    }
     while (points.length && state.elapsed - points[0][0] > chartWindow) points.shift();
+  } else if (paused || resuming) {
+    timelineBreak = true;
   } else {
     points.length = 0;
   }
@@ -190,8 +210,8 @@ function drawChart() {
   }
   if (!points.length) return;
   context.beginPath();
-  points.forEach(([time, score], index) => {
-    if (index === 0 || time - points[index - 1][0] > 1) context.moveTo(x(time), y(score));
+  points.forEach(([time, score, interrupted], index) => {
+    if (index === 0 || interrupted || time - points[index - 1][0] > 1) context.moveTo(x(time), y(score));
     else context.lineTo(x(time), y(score));
   });
   context.strokeStyle = "#63dac1";
@@ -205,9 +225,11 @@ function drawChart() {
 }
 
 async function requestAction(action, enabled) {
-  if (activeActions.has(action) || lastState?.status !== "live") return;
-  activeActions.add(action);
-  $(action).disabled = true;
+  const control = action === "resume" ? "pause" : action;
+  const expected = action === "resume" ? "paused" : "live";
+  if (activeActions.has(control) || lastState?.status !== expected) return;
+  activeActions.add(control);
+  $(control).disabled = true;
   $("action-feedback").hidden = true;
   try {
     const response = await fetch("/api/actions", {
@@ -220,16 +242,15 @@ async function requestAction(action, enabled) {
     write("action-feedback", "操作未成功，请检查本机监测是否仍在运行。");
     $("action-feedback").hidden = false;
   } finally {
-    activeActions.delete(action);
+    activeActions.delete(control);
   }
 }
 
 for (const action of ["mesh", "distraction"]) {
   $(action).addEventListener("change", (event) => requestAction(action, event.target.checked));
 }
-for (const action of ["reset", "stop"]) {
-  $(action).addEventListener("click", () => requestAction(action));
-}
+$("reset").addEventListener("click", () => requestAction("reset"));
+$("pause").addEventListener("click", () => requestAction(lastState?.status === "paused" ? "resume" : "pause"));
 new ResizeObserver(drawChart).observe($("chart"));
 
 async function refresh() {

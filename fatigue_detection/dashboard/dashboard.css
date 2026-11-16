@@ -49,8 +49,7 @@ p, small { color: var(--muted); }
 .button:hover:not(:disabled):not([aria-disabled="true"]), .toggle:hover:has(input:not(:disabled)) { background: #223441; }
 .button:disabled, .button[aria-disabled="true"], .toggle:has(input:disabled) { cursor: default; color: #788993; }
 .button:focus-visible, .toggle:focus-within { outline: 2px solid var(--mint); outline-offset: 2px; }
-.button.stop { color: #ffb9bf; }
-.button.stop:disabled { color: #788993; }
+.button[data-resume="true"] { color: var(--mint); border-color: #37766c; }
 .toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
 .toggle input { margin: 0; accent-color: var(--mint); width: 13px; height: 13px; }
 .dashboard { display: grid; grid-template-columns: minmax(0, 1.33fr) minmax(0, 1fr); gap: 16px; padding-bottom: 24px; }
