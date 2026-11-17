@@ -19,4 +19,15 @@ python -m aeb.brake_algorithm
 python -X utf8 -m aeb.simulate_staged_brake --output-dir artifacts --plot
 ```
 
-绘图需要 Matplotlib。只需要 CSV 时可去掉 `--plot`。老路径 `brake_algorithm.py` 和 `data_box.py` 转发到本包，原来的仿真命令和测试发现入口也通过转发保留。代码优化记录集中在 [docs/code-optimization](../docs/code-optimization/)。
+绘图需要 Matplotlib。只需要 CSV 时可去掉 `--plot`。
+
+## 联调导入
+
+在仓库根目录执行或把仓库安装路径加入 Python 模块搜索路径。联调模块统一使用包路径导入。
+
+```python
+from aeb.brake_algorithm import update_brake_result
+from aeb.data_box import DataBox
+```
+
+代码优化记录集中在 [docs/code-optimization](../docs/code-optimization/)。
