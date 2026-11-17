@@ -28,9 +28,11 @@ class Scenario:
     delay: float = 0.15
     capacity: float = 8.0
     actuator_jerk: float = 30.0
+    lead_brake_start_s: float = 1.2
+    lead_brake_end_s: float = 3.7
 
     def lead_accel(self, t):
-        return -self.lead_brake if 1.2 <= t < 3.7 else 0.0
+        return -self.lead_brake if self.lead_brake_start_s <= t < self.lead_brake_end_s else 0.0
 
 
 SCENARIOS = (
