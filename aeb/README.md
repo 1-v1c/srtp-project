@@ -53,3 +53,15 @@ from aeb.data_box import DataBox
 ```
 
 代码优化记录集中在 [docs/code-optimization](../docs/code-optimization/)。
+
+## 驾驶员与 AEB 同时制动
+
+单工况仿真可设置驾驶员的正值减速度请求、开始和结束时间。例如从第 2 秒到第 6 秒请求 2 m/s² 制动。
+
+```powershell
+python -X utf8 -m aeb.simulate_single_case --driver-brake-mps2 2 --driver-brake-start-s 2 --driver-brake-end-s 6 --output-dir artifacts_driver_brake
+```
+
+默认驾驶员请求为 0。时间区间左闭右开，按 20 ms 控制周期采样；结束时间默认 30 s。驾驶员请求和 AEB 请求由选定的控制器仲裁，V3 纵向取两者较大的减速度并受车辆能力限制，V2 使用原有权重逻辑。最终请求经过车辆模型的制动延迟和速率限制执行。驾驶员请求强度为踏板效果的简化量。
+
+汇总 CSV 保存这三个参数，逐帧 CSV 的 `driver_request_mps2` 保存该帧已采样的驾驶员正值请求。四行图第一行的实线表示仲裁后指令，虚线为驾驶员请求对应的负加速度。前车制动仍由 `--lead-brake-mps2` 等参数配置。
