@@ -30,6 +30,12 @@ class Scenario:
     actuator_jerk: float = 30.0
     lead_brake_start_s: float = 1.2
     lead_brake_end_s: float = 3.7
+    driver_brake_mps2: float = 0.0
+    driver_brake_start_s: float = 0.0
+    driver_brake_end_s: float = DURATION
+
+    def driver_brake(self, t):
+        return self.driver_brake_mps2 if self.driver_brake_start_s <= t < self.driver_brake_end_s else 0.0
 
     def lead_accel(self, t):
         return -self.lead_brake if self.lead_brake_start_s <= t < self.lead_brake_end_s else 0.0
@@ -70,6 +76,7 @@ def simulate(case, staged, fatigue):
             box.dy = 0.0 if case.target_valid else 3.5
             box.d = (box.dx ** 2 + box.dy ** 2) ** 0.5
             box.bumper_gap_m = gap if case.target_valid else None
+            box.a_driver = case.driver_brake(t)
             update_brake_result(box, dt_sec=CONTROL_DT, staged=staged)
 
         pending.append(min(case.capacity, box.a_final))
