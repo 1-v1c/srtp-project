@@ -34,6 +34,18 @@ class Scenario:
     driver_brake_start_s: float = 0.0
     driver_brake_end_s: float = DURATION
 
+    driver_accel_mps2: float = 0.0
+    driver_accel_start_s: float = 0.0
+    driver_accel_end_s: float = DURATION
+
+    def driver_accel(self, t):
+        return self.driver_accel_mps2 if self.driver_accel_start_s <= t < self.driver_accel_end_s else 0.0
+
+    def driver_operation(self, t):
+        # DataBox uses positive braking and negative acceleration. Brake takes priority.
+        brake = self.driver_brake(t)
+        return brake if brake > 0 else -self.driver_accel(t)
+
     def driver_brake(self, t):
         return self.driver_brake_mps2 if self.driver_brake_start_s <= t < self.driver_brake_end_s else 0.0
 
@@ -63,6 +75,7 @@ def simulate(case, staged, fatigue):
     pending = deque([0.0] * round(case.delay / PHYSICS_DT))
     applied_decel = 0.0
     actual_accel = 0.0
+    longitudinal_request = 0.0
     records = []
     for i in range(round(DURATION / PHYSICS_DT)):
         t = i * PHYSICS_DT
@@ -76,10 +89,12 @@ def simulate(case, staged, fatigue):
             box.dy = 0.0 if case.target_valid else 3.5
             box.d = (box.dx ** 2 + box.dy ** 2) ** 0.5
             box.bumper_gap_m = gap if case.target_valid else None
-            box.a_driver = case.driver_brake(t)
+            box.a_driver = case.driver_operation(t)
             update_brake_result(box, dt_sec=CONTROL_DT, staged=staged)
+            longitudinal_request = box.a_final if box.a_final > 0 or box.a_driver >= 0 else box.a_driver
 
-        pending.append(min(case.capacity, box.a_final))
+        # Use one signed longitudinal actuator. Positive means braking, negative means acceleration.
+        pending.append(min(case.capacity, longitudinal_request))
         target_decel = pending.popleft()
         increment = case.actuator_jerk * PHYSICS_DT
         applied_decel += min(increment, max(-increment, target_decel - applied_decel))
@@ -87,19 +102,19 @@ def simulate(case, staged, fatigue):
         next_lead = max(0.0, lead + lead_accel * PHYSICS_DT)
         actual_accel = (next_ego - ego) / PHYSICS_DT
         next_gap = gap + ((lead + next_lead) - (ego + next_ego)) * PHYSICS_DT / 2
-        records.append((t, gap, ego, lead, box.a_final, actual_accel, box.brake_reference,
+        records.append((t, gap, ego, lead, longitudinal_request, actual_accel, box.brake_reference,
                         box.brake_phase, box.warning, False))
         if case.target_valid and next_gap <= 1e-9:
             fraction = min(1.0, gap / (gap - next_gap))
             records.append((t + fraction * PHYSICS_DT, 0.0,
                             ego + (next_ego - ego) * fraction,
                             lead + (next_lead - lead) * fraction,
-                            box.a_final, actual_accel, box.brake_reference,
+                            longitudinal_request, actual_accel, box.brake_reference,
                             box.brake_phase, box.warning, True))
             break
         gap, ego, lead = next_gap, next_ego, next_lead
     else:
-        records.append((DURATION, gap, ego, lead, box.a_final, actual_accel,
+        records.append((DURATION, gap, ego, lead, longitudinal_request, actual_accel,
                         box.brake_reference, box.brake_phase, box.warning, False))
     return records
 
