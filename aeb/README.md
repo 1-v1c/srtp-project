@@ -63,8 +63,8 @@ python -X utf8 -m aeb.simulate_single_case --controller v3 --fatigue 0 --ego-kmh
 当前仿真总时长为 30 秒，控制周期 20 ms，车辆积分周期 5 ms，这三个值在代码中设置。`--actuator-jerk-mps3` 调节执行器能力，V3 内部各阶段的 jerk 参数由 `BrakeTuning` 设置。每次换工况可以更换输出目录，以保留各次结果。
 
 - `aeb-single-summary.csv` 只有一条工况结果，含输入参数、制动时刻、峰值、最小净距、接触与否和结束时是否仍在接近。
-- `aeb-single-traces.csv` 同步记录加速度指令、模型实际加速度、自车与前车车速、保险杠净距和制动状态。
-- `aeb-single-curves.png` 自上而下给出指令加速度、实际加速度、自车实际车速、保险杠净距。输出目录相同时，同名文件会被新一轮结果覆盖。
+- `aeb-single-traces.csv` 同步记录 AEB 系统建议加速度、仲裁后的执行指令、模型实际加速度、自车与前车车速、保险杠净距和制动状态。
+- `aeb-single-curves.png` 自上而下给出 AEB 系统建议加速度、实际加速度、自车实际车速、保险杠净距。输出目录相同时，同名文件会被新一轮结果覆盖。
 
 测试对照可分别指定 `--controller v2` 和 `--controller v3`，并为各次运行指定不同的 `--output-dir`。
 
@@ -89,7 +89,7 @@ python -X utf8 -m aeb.simulate_single_case --driver-brake-mps2 2 --driver-brake-
 
 默认驾驶员请求为 0。时间区间左闭右开，按 20 ms 控制周期采样；结束时间默认 30 s。驾驶员请求和 AEB 请求由选定的控制器仲裁，V3 纵向取两者较大的减速度并受车辆能力限制，V2 使用原有权重逻辑。最终请求经过车辆模型的制动延迟和速率限制执行。驾驶员请求强度为踏板效果的简化量。
 
-汇总 CSV 保存这三个参数，逐帧 CSV 的 `driver_request_mps2` 保存该帧已采样的驾驶员正值请求。四行图第一行的实线表示仲裁后指令，虚线为驾驶员纵向请求（加速正、制动负）。前车制动仍由 `--lead-brake-mps2` 等参数配置。
+汇总 CSV 保存这三个参数，逐帧 CSV 的 `driver_request_mps2` 保存该帧已采样的驾驶员正值请求。四行图第一行的实线表示 AEB 系统自身的建议加速度，虚线为驾驶员纵向请求（加速正、制动负）。前车制动仍由 `--lead-brake-mps2` 等参数配置。
 
 ## 驾驶员加速与减速
 
@@ -102,4 +102,6 @@ python -X utf8 -m aeb.simulate_single_case --driver-accel-mps2 1 --driver-accel-
 - 驾驶员加速请求传给算法时使用负的 `a_driver`，制动请求使用正的 `a_driver`。若两个人工输入时段重叠，先取驾驶员制动。
 - AEB 或驾驶员产生正制动指令时优先执行制动；制动指令为零时执行驾驶员加速。最终纵向请求统一经过仿真执行延迟和变化率限制，加速请求为车辆纵向加速度的简化输入。
 - CSV 保留 `driver_request_mps2` 表示驾驶员原始制动强度，新增 `driver_accel_request_mps2` 表示原始加速强度，`driver_longitudinal_request_mps2` 表示处理人工重叠后的纵向请求（加速为正，制动为负）。
-- `command_accel_mps2` 是仲裁后的纵向加速度指令。图中第一行虚线为驾驶员纵向请求，实线为仲裁后的指令；第二行实际加速度还受执行延迟和建立速率影响。
+- `aeb_accel_mps2` 是 AEB 自身的建议加速度，取自 `-box.aeb_decel`，尚未与驾驶员请求仲裁；V3 中该值已经过控制器 jerk 整形。`reference_accel_mps2` 是 V3 整形前的目标值，`command_accel_mps2` 继续保存仲裁后的执行指令。三者采用制动为负的约定。
+- 图中第一行实线为 AEB 系统建议，虚线为驾驶员纵向请求；第二行实际加速度来自最终仲裁指令，并受执行延迟和建立速率影响。驾驶员加速而 AEB 未制动时，系统建议为零，实际加速度可以为正。系统建议仍基于本次人车共同作用形成的车辆状态，并非另一次无人操作仿真的结果。
+- 共享批量仿真的逐帧 CSV 在末尾增加 `aeb_decel_mps2`，表示同一 AEB 建议值的正值减速度形式；原有列的顺序和含义保留。

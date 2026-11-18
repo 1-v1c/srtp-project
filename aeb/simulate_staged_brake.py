@@ -103,19 +103,19 @@ def simulate(case, staged, fatigue):
         actual_accel = (next_ego - ego) / PHYSICS_DT
         next_gap = gap + ((lead + next_lead) - (ego + next_ego)) * PHYSICS_DT / 2
         records.append((t, gap, ego, lead, longitudinal_request, actual_accel, box.brake_reference,
-                        box.brake_phase, box.warning, False))
+                        box.brake_phase, box.warning, False, box.aeb_decel))
         if case.target_valid and next_gap <= 1e-9:
             fraction = min(1.0, gap / (gap - next_gap))
             records.append((t + fraction * PHYSICS_DT, 0.0,
                             ego + (next_ego - ego) * fraction,
                             lead + (next_lead - lead) * fraction,
                             longitudinal_request, actual_accel, box.brake_reference,
-                            box.brake_phase, box.warning, True))
+                            box.brake_phase, box.warning, True, box.aeb_decel))
             break
         gap, ego, lead = next_gap, next_ego, next_lead
     else:
         records.append((DURATION, gap, ego, lead, longitudinal_request, actual_accel,
-                        box.brake_reference, box.brake_phase, box.warning, False))
+                        box.brake_reference, box.brake_phase, box.warning, False, box.aeb_decel))
     return records
 
 
@@ -255,7 +255,7 @@ def main():
         writer = csv.writer(f)
         writer.writerow(("scenario", "policy", "fatigue", "time_s", "bumper_gap_m",
                          "ego_mps", "lead_mps", "cmd_decel_mps2", "actual_accel_mps2",
-                         "ref_decel_mps2", "phase", "warning", "contact"))
+                         "ref_decel_mps2", "phase", "warning", "contact", "aeb_decel_mps2"))
         for (case, policy, level), trace in runs.items():
             writer.writerows((case, policy, level, *(
                 round(x, 6) if isinstance(x, float) else x for x in row)) for row in trace)
