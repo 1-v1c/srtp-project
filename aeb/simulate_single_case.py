@@ -25,6 +25,10 @@ def parse_args(argv=None):
                         help="Driver brake request in m/s², positive for braking")
     parser.add_argument("--driver-brake-start-s", type=float, default=0.0)
     parser.add_argument("--driver-brake-end-s", type=float, default=DURATION)
+    parser.add_argument("--driver-accel-mps2", type=float, default=0.0,
+                        help="Driver acceleration request in m/s², positive for acceleration")
+    parser.add_argument("--driver-accel-start-s", type=float, default=0.0)
+    parser.add_argument("--driver-accel-end-s", type=float, default=DURATION)
     args = parser.parse_args(argv)
 
     for name, value in vars(args).items():
@@ -40,6 +44,10 @@ def parse_args(argv=None):
         parser.error("driver braking must be non-negative")
     if not 0 <= args.driver_brake_start_s < args.driver_brake_end_s <= DURATION:
         parser.error(f"driver braking must satisfy 0 <= start < end <= {DURATION:g} s")
+    if args.driver_accel_mps2 < 0:
+        parser.error("driver acceleration must be non-negative")
+    if not 0 <= args.driver_accel_start_s < args.driver_accel_end_s <= DURATION:
+        parser.error(f"driver acceleration must satisfy 0 <= start < end <= {DURATION:g} s")
     return args
 
 
@@ -51,6 +59,8 @@ def trace_rows(records, case=None):
         yield {
             "time_s": t,
             "driver_request_mps2": driver_request,
+            "driver_accel_request_mps2": case.driver_accel(control_step * CONTROL_DT) if case else 0.0,
+            "driver_longitudinal_request_mps2": -case.driver_operation(control_step * CONTROL_DT) if case else 0.0,
             "command_accel_mps2": -command,
             "actual_accel_mps2": actual,
             "ego_speed_kmh": ego * 3.6,
@@ -107,10 +117,10 @@ def render_plot(path, rows, args, summary):
             ax.step(times, values, where="post", color=color, lw=2)
         else:
             ax.plot(times, values, color=color, lw=2)
-        if index == 0 and args.driver_brake_mps2 > 0:
-            ax.step(times, [-r["driver_request_mps2"] for r in rows], where="post",
+        if index == 0 and (args.driver_brake_mps2 > 0 or args.driver_accel_mps2 > 0):
+            ax.step(times, [r["driver_longitudinal_request_mps2"] for r in rows], where="post",
                     color="#a26a20", ls="--", lw=1.6,
-                    label="驾驶员制动请求" if font else "Driver brake request")
+                    label="驾驶员纵向请求" if font else "Driver longitudinal request")
             ax.lines[0].set_label("仲裁后指令" if font else "Arbitrated command")
             ax.legend(loc="lower right", frameon=False, fontsize=10)
         if args.lead_brake_mps2 > 0 and args.lead_kmh > 0:
@@ -156,6 +166,9 @@ def main(argv=None):
         driver_brake_mps2=args.driver_brake_mps2,
         driver_brake_start_s=args.driver_brake_start_s,
         driver_brake_end_s=args.driver_brake_end_s,
+        driver_accel_mps2=args.driver_accel_mps2,
+        driver_accel_start_s=args.driver_accel_start_s,
+        driver_accel_end_s=args.driver_accel_end_s,
     )
     records = simulate(case, staged=args.controller == "v3", fatigue=args.fatigue)
     result = metrics(case, records)

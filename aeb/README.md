@@ -34,7 +34,7 @@ python -X utf8 -m aeb.simulate_single_case --output-dir artifacts_single
 下面的完整命令覆盖当前单工况入口的全部可调参数。在仓库根目录整行复制运行，再按需要修改参数后的值。
 
 ```powershell
-python -X utf8 -m aeb.simulate_single_case --controller v3 --fatigue 0 --ego-kmh 60 --lead-kmh 40 --gap-m 22 --lead-brake-mps2 4 --lead-brake-start-s 1.2 --lead-brake-end-s 3.7 --driver-brake-mps2 2 --driver-brake-start-s 2 --driver-brake-end-s 6 --delay-s 0.15 --capacity-mps2 8 --actuator-jerk-mps3 30 --output-dir artifacts_custom
+python -X utf8 -m aeb.simulate_single_case --controller v3 --fatigue 0 --ego-kmh 60 --lead-kmh 40 --gap-m 22 --lead-brake-mps2 4 --lead-brake-start-s 1.2 --lead-brake-end-s 3.7 --driver-brake-mps2 2 --driver-brake-start-s 2 --driver-brake-end-s 6 --driver-accel-mps2 1 --driver-accel-start-s 0 --driver-accel-end-s 1 --delay-s 0.15 --capacity-mps2 8 --actuator-jerk-mps3 30 --output-dir artifacts_custom
 ```
 
 | 参数 | 示例值 | 含义 |
@@ -50,6 +50,9 @@ python -X utf8 -m aeb.simulate_single_case --controller v3 --fatigue 0 --ego-kmh
 | `--driver-brake-mps2` | `2` | 自车驾驶员制动请求，m/s²，填正数，`0` 表示不踩刹车 |
 | `--driver-brake-start-s` | `2` | 自车驾驶员开始踩刹车的时间，s |
 | `--driver-brake-end-s` | `6` | 自车驾驶员松开刹车的时间，s |
+| `--driver-accel-mps2` | `1` | 自车驾驶员加速强度，m/s²，填正数，默认 0 |
+| `--driver-accel-start-s` | `0` | 自车驾驶员开始加速的时间，s |
+| `--driver-accel-end-s` | `1` | 自车驾驶员结束加速的时间，s |
 | `--delay-s` | `0.15` | 车辆制动执行延迟，s |
 | `--capacity-mps2` | `8` | 车辆模型的最大减速度，m/s² |
 | `--actuator-jerk-mps3` | `30` | 执行器减速度变化率上限，m/s³ |
@@ -86,4 +89,17 @@ python -X utf8 -m aeb.simulate_single_case --driver-brake-mps2 2 --driver-brake-
 
 默认驾驶员请求为 0。时间区间左闭右开，按 20 ms 控制周期采样；结束时间默认 30 s。驾驶员请求和 AEB 请求由选定的控制器仲裁，V3 纵向取两者较大的减速度并受车辆能力限制，V2 使用原有权重逻辑。最终请求经过车辆模型的制动延迟和速率限制执行。驾驶员请求强度为踏板效果的简化量。
 
-汇总 CSV 保存这三个参数，逐帧 CSV 的 `driver_request_mps2` 保存该帧已采样的驾驶员正值请求。四行图第一行的实线表示仲裁后指令，虚线为驾驶员请求对应的负加速度。前车制动仍由 `--lead-brake-mps2` 等参数配置。
+汇总 CSV 保存这三个参数，逐帧 CSV 的 `driver_request_mps2` 保存该帧已采样的驾驶员正值请求。四行图第一行的实线表示仲裁后指令，虚线为驾驶员纵向请求（加速正、制动负）。前车制动仍由 `--lead-brake-mps2` 等参数配置。
+
+## 驾驶员加速与减速
+
+加速和制动各自指定正值强度及时间区间。下面的例子中，驾驶员先在 0–1 s 请求加速 1 m/s²，再在 2–6 s 请求制动 2 m/s²。两种操作可以在同一轮仿真中发生。
+
+```powershell
+python -X utf8 -m aeb.simulate_single_case --driver-accel-mps2 1 --driver-accel-start-s 0 --driver-accel-end-s 1 --driver-brake-mps2 2 --driver-brake-start-s 2 --driver-brake-end-s 6 --output-dir artifacts_driver_operation
+```
+
+- 驾驶员加速请求传给算法时使用负的 `a_driver`，制动请求使用正的 `a_driver`。若两个人工输入时段重叠，先取驾驶员制动。
+- AEB 或驾驶员产生正制动指令时优先执行制动；制动指令为零时执行驾驶员加速。最终纵向请求统一经过仿真执行延迟和变化率限制，加速请求为车辆纵向加速度的简化输入。
+- CSV 保留 `driver_request_mps2` 表示驾驶员原始制动强度，新增 `driver_accel_request_mps2` 表示原始加速强度，`driver_longitudinal_request_mps2` 表示处理人工重叠后的纵向请求（加速为正，制动为负）。
+- `command_accel_mps2` 是仲裁后的纵向加速度指令。图中第一行虚线为驾驶员纵向请求，实线为仲裁后的指令；第二行实际加速度还受执行延迟和建立速率影响。

@@ -76,6 +76,55 @@ class SingleCaseTests(unittest.TestCase):
                     parse_args(["--output-dir", "unused", *parameters])
                 self.assertEqual(error.exception.code, 2)
 
+    def test_acceleration_reaches_vehicle_and_trace(self):
+        case = Scenario("accel", "accel", 300.0, 10.0, 20.0, target_valid=False,
+                        driver_accel_mps2=1.0, driver_accel_start_s=0.305,
+                        driver_accel_end_s=1.005)
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                records = simulate(case, staged=staged, fatigue=0)
+                trace = list(trace_rows(records, case))
+                first = next(r for r in trace if r["driver_longitudinal_request_mps2"] > 0)
+                self.assertAlmostEqual(first["time_s"], 0.32)
+                self.assertEqual(first["command_accel_mps2"], 1.0)
+                self.assertGreater(records[-1][2], 10.5)
+                self.assertGreater(max(r[5] for r in records), 0.9)
+                self.assertTrue(all(r["driver_accel_request_mps2"] == 0
+                                    for r in trace if r["time_s"] >= 1.02))
+
+    def test_aeb_overrides_acceleration(self):
+        for staged in (False, True):
+            case = Scenario("conflict", "conflict", 5.0, 15.0, 0.0,
+                            driver_accel_mps2=2.0)
+            records = simulate(case, staged=staged, fatigue=0)
+            self.assertGreater(records[0][4], 0)
+            self.assertLess(min(row[5] for row in records), 0)
+
+    def test_braking_wins_when_driver_intervals_overlap(self):
+        case = Scenario("both", "both", 300.0, 10.0, 20.0, target_valid=False,
+                        driver_accel_mps2=1.0, driver_accel_end_s=1.0,
+                        driver_brake_mps2=2.0, driver_brake_start_s=0.5,
+                        driver_brake_end_s=0.8)
+        self.assertEqual(case.driver_operation(0.4), -1.0)
+        self.assertEqual(case.driver_operation(0.5), 2.0)
+        self.assertEqual(case.driver_operation(0.8), -1.0)
+        records = simulate(case, staged=True, fatigue=0)
+        trace = list(trace_rows(records, case))
+        at_overlap = next(r for r in trace if r["time_s"] == 0.6)
+        self.assertEqual(at_overlap["driver_longitudinal_request_mps2"], -2.0)
+        self.assertEqual(at_overlap["command_accel_mps2"], -2.0)
+
+    def test_invalid_acceleration_parameters_are_rejected(self):
+        for parameters in (
+            ["--driver-accel-mps2", "-1"],
+            ["--driver-accel-mps2", "inf"],
+            ["--driver-accel-start-s", "5", "--driver-accel-end-s", "4"],
+            ["--driver-accel-end-s", "31"],
+        ):
+            with self.subTest(parameters=parameters), patch("sys.stderr"):
+                with self.assertRaises(SystemExit):
+                    parse_args(["--output-dir", "unused", *parameters])
+
     def test_nonfinite_input_is_rejected(self):
         with patch("sys.stderr"), self.assertRaises(SystemExit) as error:
             parse_args(["--output-dir", "unused", "--delay-s", "nan"])
