@@ -125,6 +125,27 @@ class SingleCaseTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     parse_args(["--output-dir", "unused", *parameters])
 
+    def test_system_recommendation_excludes_driver_operation(self):
+        for staged in (False, True):
+            for operation in ({"driver_accel_mps2": 1.0}, {"driver_brake_mps2": 2.0}):
+                with self.subTest(staged=staged, operation=operation):
+                    case = Scenario("manual", "manual", 300.0, 10.0, 20.0,
+                                    target_valid=False, **operation)
+                    rows = list(trace_rows(simulate(case, staged, fatigue=0), case))
+                    self.assertTrue(all(r["aeb_accel_mps2"] == 0 for r in rows))
+                    self.assertNotEqual(rows[0]["command_accel_mps2"], 0)
+                    self.assertTrue(any(abs(r["actual_accel_mps2"]) > 0.5 for r in rows))
+
+    def test_system_recommendation_retains_jerk_shaping(self):
+        case = Scenario("stop", "stop", 45.0, 50 / 3.6, 0.0,
+                        driver_brake_mps2=7.0, driver_brake_end_s=1.0)
+        rows = list(trace_rows(simulate(case, staged=True, fatigue=0), case))
+        self.assertEqual(rows[0]["command_accel_mps2"], -7.0)
+        self.assertTrue(any(r["reference_accel_mps2"] < r["aeb_accel_mps2"] < 0
+                            for r in rows))
+        self.assertTrue(any(r["command_accel_mps2"] < r["aeb_accel_mps2"]
+                            for r in rows if r["time_s"] < 1.0))
+
     def test_nonfinite_input_is_rejected(self):
         with patch("sys.stderr"), self.assertRaises(SystemExit) as error:
             parse_args(["--output-dir", "unused", "--delay-s", "nan"])

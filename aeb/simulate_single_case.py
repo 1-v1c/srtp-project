@@ -52,7 +52,8 @@ def parse_args(argv=None):
 
 
 def trace_rows(records, case=None):
-    for t, gap, ego, lead, command, actual, reference, phase, warning, contact in records:
+    for (t, gap, ego, lead, command, actual, reference,
+         phase, warning, contact, aeb_decel) in records:
         # Terminal/contact snapshots retain the request latched at the last control tick.
         control_step = min(math.floor(t / CONTROL_DT + 1e-9), round(DURATION / CONTROL_DT) - 1)
         driver_request = case.driver_brake(control_step * CONTROL_DT) if case else 0.0
@@ -62,6 +63,7 @@ def trace_rows(records, case=None):
             "driver_accel_request_mps2": case.driver_accel(control_step * CONTROL_DT) if case else 0.0,
             "driver_longitudinal_request_mps2": -case.driver_operation(control_step * CONTROL_DT) if case else 0.0,
             "command_accel_mps2": -command,
+            "aeb_accel_mps2": -aeb_decel,
             "actual_accel_mps2": actual,
             "ego_speed_kmh": ego * 3.6,
             "bumper_gap_m": gap,
@@ -89,9 +91,9 @@ def render_plot(path, rows, args, summary):
         fontManager.addfont(font)
         plt.rcParams["font.family"] = FontProperties(fname=font).get_name()
     plt.rcParams.update({"axes.unicode_minus": False, "font.size": 12})
-    titles = ("指令加速度", "实际加速度", "实际车速", "保险杠净距") if font else (
-        "Commanded acceleration", "Actual acceleration", "Ego speed", "Bumper-to-bumper gap")
-    series = ("command_accel_mps2", "actual_accel_mps2", "ego_speed_kmh", "bumper_gap_m")
+    titles = ("AEB 系统建议加速度", "实际加速度", "实际车速", "保险杠净距") if font else (
+        "AEB recommended acceleration", "Actual acceleration", "Ego speed", "Bumper-to-bumper gap")
+    series = ("aeb_accel_mps2", "actual_accel_mps2", "ego_speed_kmh", "bumper_gap_m")
     units = ("m/s²", "m/s²", "km/h", "m")
     colors = ("#356482", "#006d68", "#32607c", "#9b562c")
     times = [r["time_s"] for r in rows]
@@ -121,7 +123,7 @@ def render_plot(path, rows, args, summary):
             ax.step(times, [r["driver_longitudinal_request_mps2"] for r in rows], where="post",
                     color="#a26a20", ls="--", lw=1.6,
                     label="驾驶员纵向请求" if font else "Driver longitudinal request")
-            ax.lines[0].set_label("仲裁后指令" if font else "Arbitrated command")
+            ax.lines[0].set_label("AEB 系统建议" if font else "AEB recommendation")
             ax.legend(loc="lower right", frameon=False, fontsize=10)
         if args.lead_brake_mps2 > 0 and args.lead_kmh > 0:
             stop = args.lead_brake_start_s + args.lead_kmh / 3.6 / args.lead_brake_mps2
