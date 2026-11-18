@@ -31,11 +31,33 @@ python -m pip install matplotlib
 python -X utf8 -m aeb.simulate_single_case --output-dir artifacts_single
 ```
 
-显式指定工况和制动响应参数的例子如下。速度单位使用 km/h，时间用秒，距离用米。前车制动强度填正数，填 0 时前车维持匀速。
+下面的完整命令覆盖当前单工况入口的全部可调参数。在仓库根目录整行复制运行，再按需要修改参数后的值。
 
 ```powershell
-python -X utf8 -m aeb.simulate_single_case --output-dir artifacts_following --controller v3 --fatigue 0 --ego-kmh 60 --lead-kmh 40 --gap-m 22 --lead-brake-mps2 4 --lead-brake-start-s 1.2 --lead-brake-end-s 3.7 --delay-s 0.15 --capacity-mps2 8 --actuator-jerk-mps3 30
+python -X utf8 -m aeb.simulate_single_case --controller v3 --fatigue 0 --ego-kmh 60 --lead-kmh 40 --gap-m 22 --lead-brake-mps2 4 --lead-brake-start-s 1.2 --lead-brake-end-s 3.7 --driver-brake-mps2 2 --driver-brake-start-s 2 --driver-brake-end-s 6 --delay-s 0.15 --capacity-mps2 8 --actuator-jerk-mps3 30 --output-dir artifacts_custom
 ```
+
+| 参数 | 示例值 | 含义 |
+|---|---|---|
+| `--controller` | `v3` | 算法版本，可选 `v2`、`v3` |
+| `--fatigue` | `0` | 疲劳等级，可选 `0`～`3` |
+| `--ego-kmh` | `60` | 自车初速，km/h |
+| `--lead-kmh` | `40` | 前车初速，km/h |
+| `--gap-m` | `22` | 初始保险杠净距，m |
+| `--lead-brake-mps2` | `4` | 前车减速强度，m/s²，填正数，`0` 表示不刹车 |
+| `--lead-brake-start-s` | `1.2` | 前车开始刹车的时间，s |
+| `--lead-brake-end-s` | `3.7` | 前车结束刹车的时间，s |
+| `--driver-brake-mps2` | `2` | 自车驾驶员制动请求，m/s²，填正数，`0` 表示不踩刹车 |
+| `--driver-brake-start-s` | `2` | 自车驾驶员开始踩刹车的时间，s |
+| `--driver-brake-end-s` | `6` | 自车驾驶员松开刹车的时间，s |
+| `--delay-s` | `0.15` | 车辆制动执行延迟，s |
+| `--capacity-mps2` | `8` | 车辆模型的最大减速度，m/s² |
+| `--actuator-jerk-mps3` | `30` | 执行器减速度变化率上限，m/s³ |
+| `--output-dir` | `artifacts_custom` | 保存两份 CSV 和曲线图的目录 |
+
+前车和驾驶员制动区间均为开始时刻包含、结束时刻不包含。驾驶员时间满足 `0 ≤ 开始 < 结束 ≤ 30` 秒。
+
+当前仿真总时长为 30 秒，控制周期 20 ms，车辆积分周期 5 ms，这三个值在代码中设置。`--actuator-jerk-mps3` 调节执行器能力，V3 内部各阶段的 jerk 参数由 `BrakeTuning` 设置。每次换工况可以更换输出目录，以保留各次结果。
 
 - `aeb-single-summary.csv` 只有一条工况结果，含输入参数、制动时刻、峰值、最小净距、接触与否和结束时是否仍在接近。
 - `aeb-single-traces.csv` 同步记录加速度指令、模型实际加速度、自车与前车车速、保险杠净距和制动状态。
